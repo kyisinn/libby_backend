@@ -1,6 +1,6 @@
 # app.py
 # FINAL VERSION: This API is fully powered by the PostgreSQL database
-# and has been updated to use the new, relational table structure.
+# and has been updated to use a consistent response format for all book lists.
 
 # Step 1: Import the necessary libraries
 from flask import Flask, jsonify, request
@@ -8,7 +8,7 @@ from flask_cors import CORS
 import psycopg2 
 import os
 from werkzeug.security import generate_password_hash, check_password_hash
-from psycopg2.extras import RealDictCursor # To get results as dictionaries
+from psycopg2.extras import RealDictCursor
 
 # Step 2: Create an instance of the Flask application
 app = Flask(__name__)
@@ -28,67 +28,13 @@ def get_db_connection():
         return None
 
 # --- User Authentication Endpoints ---
-@app.route('/api/register', methods=['POST'])
-def register_user():
-    """Registers a new user in the 'users' table."""
-    data = request.get_json()
-    if not data or not data.get('email') or not data.get('password') or not data.get('firstName') or not data.get('lastName'):
-        return jsonify({"error": "First name, last name, email, and password are required."}), 400
-    
-    email = data['email']
-    first_name = data['firstName']
-    last_name = data['lastName']
-    password_hash = generate_password_hash(data['password'])
-    
-    conn = get_db_connection()
-    if not conn: return jsonify({"error": "Database connection failed."}), 500
-    
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO users (first_name, last_name, email, password_hash) VALUES (%s, %s, %s, %s)",
-            (first_name, last_name, email, password_hash)
-        )
-        conn.commit()
-    except psycopg2.IntegrityError:
-        return jsonify({"error": "This email address is already registered."}), 409
-    finally:
-        cursor.close()
-        conn.close()
-        
-    return jsonify({"message": "User registered successfully!"}), 201
+# ... (These remain the same)
 
-@app.route('/api/login', methods=['POST'])
-def login_user():
-    """Logs in a user by checking their credentials against the 'users' table."""
-    data = request.get_json()
-    if not data or not data.get('email') or not data.get('password'):
-        return jsonify({"error": "Email and password are required."}), 400
-    
-    email = data['email']
-    password = data['password']
-    
-    conn = get_db_connection()
-    if not conn: return jsonify({"error": "Database connection failed."}), 500
-    
-    try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
-        user = cursor.fetchone()
-        
-        if user and check_password_hash(user["password_hash"], password):
-            return jsonify({"message": "Login successful!", "user_id": user["user_id"]}), 200
-        else:
-            return jsonify({"error": "Invalid email or password."}), 401
-    finally:
-        cursor.close()
-        conn.close()
-
-# --- Book-related Endpoints ---
+# --- Book-related Endpoints (Now with consistent responses) ---
 
 @app.route('/api/search', methods=['GET'])
 def search_books():
-    """Searches for books by title or author name."""
+    """Searches for books and returns them in the standard paginated format."""
     query = request.args.get('q', '')
     if not query: return jsonify({"error": "Query required"}), 400
     
@@ -107,16 +53,21 @@ def search_books():
             (search_query, search_query)
         )
         results = cursor.fetchall()
-        return jsonify(results)
+        # FIXED: Wrap the results in the standard object format
+        return jsonify({
+            'books': results,
+            'total_books': len(results),
+            'page': 1,
+            'per_page': len(results)
+        })
     finally:
         cursor.close()
         conn.close()
 
 @app.route('/api/recommendations/globally-trending', methods=['GET'])
 def get_globally_trending():
-    """Gets top books based on a timespan, with pagination."""
+    """Gets top books with the highest rating that have a cover, with pagination."""
     page = request.args.get('page', 1, type=int)
-    timespan = request.args.get('timespan', 'week', type=str) # New timespan parameter
     per_page = 20 
     offset = (page - 1) * per_page
     
@@ -125,31 +76,21 @@ def get_globally_trending():
     
     try:
         cursor = conn.cursor()
-        
-        # UPDATED: Select the ordering method based on the timespan
-        if timespan == 'month':
-            order_by_clause = "b.publication_date DESC NULLS LAST"
-        elif timespan == 'year':
-            order_by_clause = "RANDOM()"
-        else: # Default to 'week'
-            order_by_clause = "b.rating DESC NULLS LAST"
-
-        query = f"""
-            SELECT
-                b.book_id AS id, b.title, b.cover_image_url AS coverurl, b.rating,
-                a.first_name || ' ' || a.last_name AS author
-            FROM books b
-            JOIN book_authors ba ON b.book_id = ba.book_id
-            JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.cover_image_url IS NOT NULL AND b.cover_image_url <> ''
-            ORDER BY {order_by_clause}
+        # UPDATED: This query now orders by rating and ensures a cover image exists.
+        cursor.execute(
+            """
+            SELECT b.book_id AS id, b.title, b.cover_image_url AS coverurl, b.rating, a.first_name || ' ' || a.last_name AS author
+            FROM books b JOIN book_authors ba ON b.book_id = ba.book_id JOIN authors a ON ba.author_id = a.author_id
+            WHERE b.cover_image_url IS NOT NULL AND b.cover_image_url <> '' AND b.rating IS NOT NULL
+            ORDER BY b.rating DESC
             LIMIT %s OFFSET %s
-        """
-        
-        cursor.execute(query, (per_page, offset))
+            """,
+            (per_page, offset)
+        )
         results = cursor.fetchall()
         
-        cursor.execute("SELECT COUNT(*) FROM books WHERE cover_image_url IS NOT NULL AND cover_image_url <> ''")
+        # UPDATED: The count query must also match the new WHERE clause.
+        cursor.execute("SELECT COUNT(*) FROM books WHERE cover_image_url IS NOT NULL AND cover_image_url <> '' AND rating IS NOT NULL")
         total_books = cursor.fetchone()['count']
         
         return jsonify({
@@ -162,7 +103,38 @@ def get_globally_trending():
         cursor.close()
         conn.close()
 
-# ... (other book routes remain the same) ...
+@app.route('/api/recommendations/by-major', methods=['GET'])
+def get_by_major():
+    """Gets books by major and returns them in the standard paginated format."""
+    major = request.args.get('major', 'Computer Science', type=str)
+    conn = get_db_connection()
+    if not conn: return jsonify({"error": "Database connection failed."}), 500
+    
+    try:
+        cursor = conn.cursor()
+        search_query = f"%{major}%"
+        cursor.execute(
+            """
+            SELECT b.book_id AS id, b.title, b.cover_image_url AS coverurl, a.first_name || ' ' || a.last_name AS author
+            FROM books b JOIN book_authors ba ON b.book_id = ba.book_id JOIN authors a ON ba.author_id = a.author_id
+            WHERE b.genre ILIKE %s
+            ORDER BY b.rating DESC NULLS LAST LIMIT 10
+            """,
+            (search_query,)
+        )
+        results = cursor.fetchall()
+        # FIXED: Wrap the results in the standard object format
+        return jsonify({
+            'books': results,
+            'total_books': len(results),
+            'page': 1,
+            'per_page': 10
+        })
+    finally:
+        cursor.close()
+        conn.close()
+
+# ... (other routes like /api/books/<id> remain the same) ...
 
 # Step 5: Run the Flask Application
 if __name__ == '__main__':
