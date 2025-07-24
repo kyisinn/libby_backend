@@ -100,9 +100,19 @@ def search_books():
         search_query = f"%{query}%"
         cursor.execute(
             """
-            SELECT b.book_id AS id, b.title, b.cover_image_url AS coverurl, a.first_name || ' ' || a.last_name AS author
-            FROM books b JOIN book_authors ba ON b.book_id = ba.book_id JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.title ILIKE %s OR (a.first_name || ' ' || a.last_name) ILIKE %s
+            SELECT
+                b.book_id AS id,
+                b.title,
+                b.cover_image_url AS coverurl,
+                a.first_name || ' ' || a.last_name AS author
+            FROM
+                books b
+            JOIN
+                book_authors ba ON b.book_id = ba.book_id
+            JOIN
+                authors a ON ba.author_id = a.author_id
+            WHERE
+                b.title ILIKE %s OR (a.first_name || ' ' || a.last_name) ILIKE %s
             """,
             (search_query, search_query)
         )
@@ -114,55 +124,80 @@ def search_books():
 
 @app.route('/api/recommendations/globally-trending', methods=['GET'])
 def get_globally_trending():
-    """Gets top books based on a timespan, with pagination."""
-    page = request.args.get('page', 1, type=int)
-    timespan = request.args.get('timespan', 'week', type=str) # New timespan parameter
-    per_page = 20 
-    offset = (page - 1) * per_page
-    
+    """Gets 10 random books that have a cover image."""
     conn = get_db_connection()
     if not conn: return jsonify({"error": "Database connection failed."}), 500
     
     try:
         cursor = conn.cursor()
-        
-        # UPDATED: Select the ordering method based on the timespan
-        if timespan == 'month':
-            order_by_clause = "b.publication_date DESC NULLS LAST"
-        elif timespan == 'year':
-            order_by_clause = "RANDOM()"
-        else: # Default to 'week'
-            order_by_clause = "b.rating DESC NULLS LAST"
-
-        query = f"""
+        # --- THIS IS THE FIX ---
+        # This query is less strict. It gets 10 random books that have a cover,
+        # ensuring that something will always be returned if possible.
+        cursor.execute(
+            """
             SELECT
-                b.book_id AS id, b.title, b.cover_image_url AS coverurl, b.rating,
+                b.book_id AS id,
+                b.title,
+                b.cover_image_url AS coverurl,
+                b.rating,
                 a.first_name || ' ' || a.last_name AS author
-            FROM books b
-            JOIN book_authors ba ON b.book_id = ba.book_id
-            JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.cover_image_url IS NOT NULL AND b.cover_image_url <> ''
-            ORDER BY {order_by_clause}
-            LIMIT %s OFFSET %s
-        """
-        
-        cursor.execute(query, (per_page, offset))
+            FROM
+                books b
+            JOIN
+                book_authors ba ON b.book_id = ba.book_id
+            JOIN
+                authors a ON ba.author_id = a.author_id
+            WHERE
+                b.cover_image_url IS NOT NULL AND b.cover_image_url <> ''
+            ORDER BY
+                RANDOM()
+            LIMIT 10
+            """
+        )
         results = cursor.fetchall()
-        
-        cursor.execute("SELECT COUNT(*) FROM books WHERE cover_image_url IS NOT NULL AND cover_image_url <> ''")
-        total_books = cursor.fetchone()['count']
-        
-        return jsonify({
-            'books': results,
-            'total_books': total_books,
-            'page': page,
-            'per_page': per_page
-        })
+        return jsonify(results)
     finally:
         cursor.close()
         conn.close()
 
-# ... (other book routes remain the same) ...
+@app.route('/api/recommendations/based-on-book/<int:book_id>', methods=['GET'])
+def recommend_based_on_book(book_id):
+    """Recommends other books from the same category."""
+    conn = get_db_connection()
+    if not conn: return jsonify({"error": "Database connection failed."}), 500
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT category_id FROM book_categories WHERE book_id = %s", (book_id,))
+        categories = cursor.fetchall()
+        
+        if not categories:
+            return jsonify({"error": "Source book has no categories to base recommendations on."}), 404
+        
+        category_ids = [cat['category_id'] for cat in categories]
+        
+        cursor.execute(
+            """
+            SELECT DISTINCT
+                b.book_id AS id,
+                b.title,
+                b.cover_image_url AS coverurl,
+                a.first_name || ' ' || a.last_name AS author
+            FROM books b
+            JOIN book_authors ba ON b.book_id = ba.book_id
+            JOIN authors a ON ba.author_id = a.author_id
+            JOIN book_categories bc ON b.book_id = bc.book_id
+            WHERE bc.category_id = ANY(%s) AND b.book_id != %s
+            ORDER BY RANDOM() 
+            LIMIT 10
+            """,
+            (category_ids, book_id)
+        )
+        recommendations = cursor.fetchall()
+        return jsonify(recommendations)
+    finally:
+        cursor.close()
+        conn.close()
 
 # Step 5: Run the Flask Application
 if __name__ == '__main__':
