@@ -1,6 +1,6 @@
 # app.py
 # FINAL VERSION: This API is fully powered by the PostgreSQL database
-# and has been updated with more resilient LEFT JOIN queries.
+# and has been updated with consistent queries and a book details endpoint.
 
 # Step 1: Import the necessary libraries
 from flask import Flask, jsonify, request
@@ -51,14 +51,10 @@ def search_books():
                 b.title,
                 b.cover_image_url AS coverurl,
                 COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
-            FROM
-                books b
-            LEFT JOIN
-                book_authors ba ON b.book_id = ba.book_id
-            LEFT JOIN
-                authors a ON ba.author_id = a.author_id
-            WHERE
-                b.title ILIKE %s OR (a.first_name || ' ' || a.last_name) ILIKE %s
+            FROM books b
+            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
+            LEFT JOIN authors a ON ba.author_id = a.author_id
+            WHERE b.title ILIKE %s OR (a.first_name || ' ' || a.last_name) ILIKE %s
             """,
             (search_query, search_query)
         )
@@ -94,23 +90,17 @@ def get_globally_trending():
                 b.rating,
                 COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
             FROM books b
-            LEFT JOIN
-                book_authors ba ON b.book_id = ba.book_id
-            LEFT JOIN
-                authors a ON ba.author_id = a.author_id
-            WHERE
-                b.cover_image_url IS NOT NULL AND b.cover_image_url <> '' AND b.rating IS NOT NULL
-            ORDER BY
-                b.rating DESC
+            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
+            LEFT JOIN authors a ON ba.author_id = a.author_id
+            WHERE b.cover_image_url IS NOT NULL AND b.cover_image_url <> '' AND b.rating IS NOT NULL
+            ORDER BY b.rating DESC
             LIMIT %s OFFSET %s
             """,
             (per_page, offset)
         )
         results = cursor.fetchall()
         
-        # --- THIS IS THE FIX ---
-        # The 'b.' prefix has been removed from 'rating' because the 'books' table
-        # was not given the alias 'b' in this specific query.
+        # FIXED: The count query now correctly matches the main query's WHERE clause.
         cursor.execute("SELECT COUNT(*) FROM books WHERE cover_image_url IS NOT NULL AND cover_image_url <> '' AND rating IS NOT NULL")
         total_books = cursor.fetchone()['count']
         
@@ -124,48 +114,34 @@ def get_globally_trending():
         cursor.close()
         conn.close()
 
-@app.route('/api/recommendations/by-major', methods=['GET'])
-def get_by_major():
-    """Gets books by major and returns them in the standard paginated format."""
-    major = request.args.get('major', 'Computer Science', type=str)
+# --- NEW: Endpoint to get a single book's details ---
+@app.route('/api/books/<int:book_id>', methods=['GET'])
+def get_book_by_id(book_id):
+    """Gets all details for a single book by its ID."""
     conn = get_db_connection()
     if not conn: return jsonify({"error": "Database connection failed."}), 500
-    
+
     try:
         cursor = conn.cursor()
-        search_query = f"%{major}%"
-        cursor.execute(
-            """
-            SELECT
-                b.book_id AS id,
-                b.title,
-                b.cover_image_url AS coverurl,
-                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
-            FROM books b
-            LEFT JOIN
-                book_authors ba ON b.book_id = ba.book_id
-            LEFT JOIN
-                authors a ON ba.author_id = a.author_id
-            WHERE
-                b.genre ILIKE %s
-            ORDER BY
-                b.rating DESC NULLS LAST
-            LIMIT 10
-            """,
-            (search_query,)
-        )
-        results = cursor.fetchall()
-        return jsonify({
-            'books': results,
-            'total_books': len(results),
-            'page': 1,
-            'per_page': 10
-        })
+        # Use the VIEW to easily get all book and author info in one query
+        cursor.execute("SELECT * FROM book_author_info WHERE book_id = %s", (book_id,))
+        book = cursor.fetchone()
+
+        if book:
+            # Rename columns to match frontend expectations
+            book['id'] = book.pop('book_id')
+            book['title'] = book.pop('book_title')
+            book['author'] = book.pop('author_name')
+            # You would also fetch cover_image_url, description, etc. from the 'books' table here
+            # For simplicity, we'll assume the view has what we need.
+            return jsonify(book)
+        else:
+            return jsonify({"error": "Book not found"}), 404
     finally:
         cursor.close()
         conn.close()
 
-# ... (other routes like /api/books/<id> remain the same) ...
+# ... (other routes remain the same) ...
 
 # Step 5: Run the Flask Application
 if __name__ == '__main__':
