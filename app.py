@@ -45,7 +45,6 @@ def register_user():
     
     try:
         cursor = conn.cursor()
-        # Assumes a 'password_hash' column has been added to your users table.
         cursor.execute(
             "INSERT INTO users (first_name, last_name, email, password_hash) VALUES (%s, %s, %s, %s)",
             (first_name, last_name, email, password_hash)
@@ -77,7 +76,6 @@ def login_user():
         cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
         user = cursor.fetchone()
         
-        # Assumes a 'password_hash' column exists.
         if user and check_password_hash(user["password_hash"], password):
             return jsonify({"message": "Login successful!", "user_id": user["user_id"]}), 200
         else:
@@ -102,19 +100,9 @@ def search_books():
         search_query = f"%{query}%"
         cursor.execute(
             """
-            SELECT
-                b.book_id AS id,
-                b.title,
-                b.cover_image_url AS coverurl,
-                a.first_name || ' ' || a.last_name AS author
-            FROM
-                books b
-            JOIN
-                book_authors ba ON b.book_id = ba.book_id
-            JOIN
-                authors a ON ba.author_id = a.author_id
-            WHERE
-                b.title ILIKE %s OR (a.first_name || ' ' || a.last_name) ILIKE %s
+            SELECT b.book_id AS id, b.title, b.cover_image_url AS coverurl, a.first_name || ' ' || a.last_name AS author
+            FROM books b JOIN book_authors ba ON b.book_id = ba.book_id JOIN authors a ON ba.author_id = a.author_id
+            WHERE b.title ILIKE %s OR (a.first_name || ' ' || a.last_name) ILIKE %s
             """,
             (search_query, search_query)
         )
@@ -132,27 +120,39 @@ def get_globally_trending():
     
     try:
         cursor = conn.cursor()
-        # UPDATED: Aliased cover_image_url to coverurl to match the frontend's expectation.
         cursor.execute(
             """
-            SELECT
-                b.book_id AS id,
-                b.title,
-                b.cover_image_url AS coverurl,
-                b.rating,
-                a.first_name || ' ' || a.last_name AS author
-            FROM
-                books b
-            JOIN
-                book_authors ba ON b.book_id = ba.book_id
-            JOIN
-                authors a ON ba.author_id = a.author_id
-            WHERE
-                b.cover_image_url IS NOT NULL AND b.cover_image_url <> '' AND b.rating IS NOT NULL
-            ORDER BY
-                b.rating DESC
-            LIMIT 10
+            SELECT b.book_id AS id, b.title, b.cover_image_url AS coverurl, b.rating, a.first_name || ' ' || a.last_name AS author
+            FROM books b JOIN book_authors ba ON b.book_id = ba.book_id JOIN authors a ON ba.author_id = a.author_id
+            WHERE b.cover_image_url IS NOT NULL AND b.cover_image_url <> '' AND b.rating IS NOT NULL
+            ORDER BY b.rating DESC LIMIT 10
             """
+        )
+        results = cursor.fetchall()
+        return jsonify(results)
+    finally:
+        cursor.close()
+        conn.close()
+
+# NEW: Endpoint to get books by major/genre
+@app.route('/api/recommendations/by-major', methods=['GET'])
+def get_by_major():
+    """Gets books where the genre is similar to the selected major."""
+    major = request.args.get('major', 'Computer Science', type=str)
+    conn = get_db_connection()
+    if not conn: return jsonify({"error": "Database connection failed."}), 500
+    
+    try:
+        cursor = conn.cursor()
+        search_query = f"%{major}%"
+        cursor.execute(
+            """
+            SELECT b.book_id AS id, b.title, b.cover_image_url AS coverurl, a.first_name || ' ' || a.last_name AS author
+            FROM books b JOIN book_authors ba ON b.book_id = ba.book_id JOIN authors a ON ba.author_id = a.author_id
+            WHERE b.genre ILIKE %s
+            ORDER BY b.rating DESC NULLS LAST LIMIT 10
+            """,
+            (search_query,)
         )
         results = cursor.fetchall()
         return jsonify(results)
@@ -168,7 +168,6 @@ def recommend_based_on_book(book_id):
     
     try:
         cursor = conn.cursor()
-        # Assumes a 'book_categories' join table exists (book_id, category_id).
         cursor.execute("SELECT category_id FROM book_categories WHERE book_id = %s", (book_id,))
         categories = cursor.fetchall()
         
@@ -179,18 +178,10 @@ def recommend_based_on_book(book_id):
         
         cursor.execute(
             """
-            SELECT DISTINCT
-                b.book_id AS id,
-                b.title,
-                b.cover_image_url AS coverurl,
-                a.first_name || ' ' || a.last_name AS author
-            FROM books b
-            JOIN book_authors ba ON b.book_id = ba.book_id
-            JOIN authors a ON ba.author_id = a.author_id
-            JOIN book_categories bc ON b.book_id = bc.book_id
+            SELECT DISTINCT b.book_id AS id, b.title, b.cover_image_url AS coverurl, a.first_name || ' ' || a.last_name AS author
+            FROM books b JOIN book_authors ba ON b.book_id = ba.book_id JOIN authors a ON ba.author_id = a.author_id JOIN book_categories bc ON b.book_id = bc.book_id
             WHERE bc.category_id = ANY(%s) AND b.book_id != %s
-            ORDER BY RANDOM() 
-            LIMIT 10
+            ORDER BY RANDOM() LIMIT 10
             """,
             (category_ids, book_id)
         )
