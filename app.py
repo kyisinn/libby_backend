@@ -100,7 +100,6 @@ def search_books():
     try:
         cursor = conn.cursor()
         search_query = f"%{query}%"
-        # UPDATED: Query now joins tables and aliases columns to match frontend expectations
         cursor.execute(
             """
             SELECT
@@ -133,7 +132,7 @@ def get_globally_trending():
     
     try:
         cursor = conn.cursor()
-        # UPDATED: This query now defines "trending" as the highest-rated books with covers.
+        # UPDATED: Aliased cover_image_url to coverurl to match the frontend's expectation.
         cursor.execute(
             """
             SELECT
@@ -178,7 +177,6 @@ def recommend_based_on_book(book_id):
         
         category_ids = [cat['category_id'] for cat in categories]
         
-        # UPDATED: Query now joins tables and aliases columns to match frontend expectations
         cursor.execute(
             """
             SELECT DISTINCT
