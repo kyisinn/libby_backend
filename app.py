@@ -1,6 +1,6 @@
 # app.py
 # FINAL VERSION: This API is fully powered by the PostgreSQL database
-# and has been updated to use a consistent response format for all book lists.
+# and has been updated with more resilient LEFT JOIN queries.
 
 # Step 1: Import the necessary libraries
 from flask import Flask, jsonify, request
@@ -44,16 +44,26 @@ def search_books():
     try:
         cursor = conn.cursor()
         search_query = f"%{query}%"
+        # UPDATED: Using LEFT JOIN to ensure books are always returned
         cursor.execute(
             """
-            SELECT b.book_id AS id, b.title, b.cover_image_url AS coverurl, a.first_name || ' ' || a.last_name AS author
-            FROM books b JOIN book_authors ba ON b.book_id = ba.book_id JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.title ILIKE %s OR (a.first_name || ' ' || a.last_name) ILIKE %s
+            SELECT
+                b.book_id AS id,
+                b.title,
+                b.cover_image_url AS coverurl,
+                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
+            FROM
+                books b
+            LEFT JOIN
+                book_authors ba ON b.book_id = ba.book_id
+            LEFT JOIN
+                authors a ON ba.author_id = a.author_id
+            WHERE
+                b.title ILIKE %s OR (a.first_name || ' ' || a.last_name) ILIKE %s
             """,
             (search_query, search_query)
         )
         results = cursor.fetchall()
-        # FIXED: Wrap the results in the standard object format
         return jsonify({
             'books': results,
             'total_books': len(results),
@@ -66,7 +76,7 @@ def search_books():
 
 @app.route('/api/recommendations/globally-trending', methods=['GET'])
 def get_globally_trending():
-    """Gets top books with the highest rating that have a cover, with pagination."""
+    """Gets top books that have a cover, with pagination."""
     page = request.args.get('page', 1, type=int)
     per_page = 20 
     offset = (page - 1) * per_page
@@ -76,21 +86,31 @@ def get_globally_trending():
     
     try:
         cursor = conn.cursor()
-        # UPDATED: This query now orders by rating and ensures a cover image exists.
+        # UPDATED: Switched back to ordering by rating instead of random.
         cursor.execute(
             """
-            SELECT b.book_id AS id, b.title, b.cover_image_url AS coverurl, b.rating, a.first_name || ' ' || a.last_name AS author
-            FROM books b JOIN book_authors ba ON b.book_id = ba.book_id JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.cover_image_url IS NOT NULL AND b.cover_image_url <> '' AND b.rating IS NOT NULL
-            ORDER BY b.rating DESC
+            SELECT
+                b.book_id AS id,
+                b.title,
+                b.cover_image_url AS coverurl,
+                b.rating,
+                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
+            FROM books b
+            LEFT JOIN
+                book_authors ba ON b.book_id = ba.book_id
+            LEFT JOIN
+                authors a ON ba.author_id = a.author_id
+            WHERE
+                b.cover_image_url IS NOT NULL AND b.cover_image_url <> '' AND b.rating IS NOT NULL
+            ORDER BY
+                b.rating DESC
             LIMIT %s OFFSET %s
             """,
             (per_page, offset)
         )
         results = cursor.fetchall()
         
-        # UPDATED: The count query must also match the new WHERE clause.
-        cursor.execute("SELECT COUNT(*) FROM books WHERE cover_image_url IS NOT NULL AND cover_image_url <> '' AND rating IS NOT NULL")
+        cursor.execute("SELECT COUNT(*) FROM books WHERE cover_image_url IS NOT NULL AND cover_image_url <> '' AND b.rating IS NOT NULL")
         total_books = cursor.fetchone()['count']
         
         return jsonify({
@@ -113,17 +133,28 @@ def get_by_major():
     try:
         cursor = conn.cursor()
         search_query = f"%{major}%"
+        # UPDATED: Using LEFT JOIN to ensure books are always returned
         cursor.execute(
             """
-            SELECT b.book_id AS id, b.title, b.cover_image_url AS coverurl, a.first_name || ' ' || a.last_name AS author
-            FROM books b JOIN book_authors ba ON b.book_id = ba.book_id JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.genre ILIKE %s
-            ORDER BY b.rating DESC NULLS LAST LIMIT 10
+            SELECT
+                b.book_id AS id,
+                b.title,
+                b.cover_image_url AS coverurl,
+                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
+            FROM books b
+            LEFT JOIN
+                book_authors ba ON b.book_id = ba.book_id
+            LEFT JOIN
+                authors a ON ba.author_id = a.author_id
+            WHERE
+                b.genre ILIKE %s
+            ORDER BY
+                b.rating DESC NULLS LAST
+            LIMIT 10
             """,
             (search_query,)
         )
         results = cursor.fetchall()
-        # FIXED: Wrap the results in the standard object format
         return jsonify({
             'books': results,
             'total_books': len(results),
