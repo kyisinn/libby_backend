@@ -44,7 +44,6 @@ def search_books():
     try:
         cursor = conn.cursor()
         search_query = f"%{query}%"
-        # UPDATED: Using LEFT JOIN to ensure books are always returned
         cursor.execute(
             """
             SELECT
@@ -86,7 +85,6 @@ def get_globally_trending():
     
     try:
         cursor = conn.cursor()
-        # UPDATED: Switched back to ordering by rating instead of random.
         cursor.execute(
             """
             SELECT
@@ -110,7 +108,10 @@ def get_globally_trending():
         )
         results = cursor.fetchall()
         
-        cursor.execute("SELECT COUNT(*) FROM books WHERE cover_image_url IS NOT NULL AND cover_image_url <> '' AND b.rating IS NOT NULL")
+        # --- THIS IS THE FIX ---
+        # The 'b.' prefix has been removed from 'rating' because the 'books' table
+        # was not given the alias 'b' in this specific query.
+        cursor.execute("SELECT COUNT(*) FROM books WHERE cover_image_url IS NOT NULL AND cover_image_url <> '' AND rating IS NOT NULL")
         total_books = cursor.fetchone()['count']
         
         return jsonify({
@@ -133,7 +134,6 @@ def get_by_major():
     try:
         cursor = conn.cursor()
         search_query = f"%{major}%"
-        # UPDATED: Using LEFT JOIN to ensure books are always returned
         cursor.execute(
             """
             SELECT
