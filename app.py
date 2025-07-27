@@ -122,7 +122,7 @@ def get_globally_trending():
 
 @app.route('/api/recommendations/by-major', methods=['GET'])
 def get_by_major():
-    """Gets books by major and returns a simple list."""
+    """Gets books by major and returns them in the standard paginated format."""
     major = request.args.get('major', 'Computer Science', type=str)
     conn = get_db_connection()
     if not conn: return jsonify({"error": "Database connection failed."}), 500
@@ -132,22 +132,22 @@ def get_by_major():
         search_query = f"%{major}%"
         cursor.execute(
             """
-            SELECT
-                b.book_id AS id,
-                b.title,
-                b.cover_image_url AS coverurl,
-                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
-            FROM books b
-            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
-            LEFT JOIN authors a ON ba.author_id = a.author_id
+            SELECT b.book_id AS id, b.title, b.cover_image_url AS coverurl, a.first_name || ' ' || a.last_name AS author
+            FROM books b JOIN book_authors ba ON b.book_id = ba.book_id JOIN authors a ON ba.author_id = a.author_id
             WHERE b.genre ILIKE %s
-            ORDER BY b.rating DESC NULLS LAST
-            LIMIT 10
+            ORDER BY b.rating DESC NULLS LAST LIMIT 10
             """,
             (search_query,)
         )
         results = cursor.fetchall()
-        return jsonify(results) # Return a direct list
+        # --- THIS IS THE FIX ---
+        # This now correctly wraps the results in the standard object format.
+        return jsonify({
+            'books': results,
+            'total_books': len(results),
+            'page': 1,
+            'per_page': 10
+        })
     finally:
         cursor.close()
         conn.close()
