@@ -66,12 +66,18 @@ def search_books():
 
 @app.route('/api/recommendations/globally-trending', methods=['GET'])
 def get_globally_trending():
-    """Gets the 10 highest-rated books that have a cover image."""
+    """Gets top books published in the current month that have a cover."""
+    page = request.args.get('page', 1, type=int)
+    per_page = 20 
+    offset = (page - 1) * per_page
+    
     conn = get_db_connection()
     if not conn: return jsonify({"error": "Database connection failed."}), 500
     
     try:
         cursor = conn.cursor()
+        # --- THIS IS THE UPDATED QUERY ---
+        # It now filters for books published in the current month of the current year.
         cursor.execute(
             """
             SELECT
@@ -81,15 +87,37 @@ def get_globally_trending():
                 b.rating,
                 COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
             FROM books b
-            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
-            LEFT JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.cover_image_url IS NOT NULL AND b.cover_image_url <> '' AND b.rating IS NOT NULL
-            ORDER BY b.rating DESC
-            LIMIT 10
-            """
+            LEFT JOIN
+                book_authors ba ON b.book_id = ba.book_id
+            LEFT JOIN
+                authors a ON ba.author_id = a.author_id
+            WHERE
+                b.cover_image_url IS NOT NULL AND b.cover_image_url <> ''
+                AND b.publication_date >= DATE_TRUNC('month', CURRENT_DATE)
+                AND b.publication_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
+            ORDER BY
+                b.publication_date DESC
+            LIMIT %s OFFSET %s
+            """,
+            (per_page, offset)
         )
         results = cursor.fetchall()
-        return jsonify(results) # Return a direct list
+        
+        # The count query must also match the new WHERE clause.
+        cursor.execute("""
+            SELECT COUNT(*) FROM books 
+            WHERE cover_image_url IS NOT NULL AND cover_image_url <> ''
+            AND publication_date >= DATE_TRUNC('month', CURRENT_DATE)
+            AND publication_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
+        """)
+        total_books = cursor.fetchone()['count']
+        
+        return jsonify({
+            'books': results,
+            'total_books': total_books,
+            'page': page,
+            'per_page': per_page
+        })
     finally:
         cursor.close()
         conn.close()
