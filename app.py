@@ -77,7 +77,7 @@ def get_globally_trending():
     try:
         cursor = conn.cursor()
         # --- THIS IS THE UPDATED QUERY ---
-        # It now filters for books published in the current month of the current year.
+        # This query now filters for books published in the last five years.
         cursor.execute(
             """
             SELECT
@@ -93,8 +93,7 @@ def get_globally_trending():
                 authors a ON ba.author_id = a.author_id
             WHERE
                 b.cover_image_url IS NOT NULL AND b.cover_image_url <> ''
-                AND b.publication_date >= DATE_TRUNC('month', CURRENT_DATE)
-                AND b.publication_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
+                AND b.publication_date >= CURRENT_DATE - INTERVAL '5 years'
             ORDER BY
                 b.publication_date DESC
             LIMIT %s OFFSET %s
@@ -107,8 +106,7 @@ def get_globally_trending():
         cursor.execute("""
             SELECT COUNT(*) FROM books 
             WHERE cover_image_url IS NOT NULL AND cover_image_url <> ''
-            AND publication_date >= DATE_TRUNC('month', CURRENT_DATE)
-            AND publication_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
+            AND publication_date >= CURRENT_DATE - INTERVAL '5 years'
         """)
         total_books = cursor.fetchone()['count']
         
