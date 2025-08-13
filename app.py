@@ -124,16 +124,26 @@ def get_globally_trending():
         cursor.close()
         conn.close()
 
+
 @app.route('/api/recommendations/by-major', methods=['GET'])
 def get_by_major():
-    """Gets books by major and returns a simple list."""
+    """
+    Gets books by major with pagination and returns a structured object.
+    """
     major = request.args.get('major', 'Computer Science', type=str)
+    # --- NEW: Get page number from request, default to 1 ---
+    page = request.args.get('page', 1, type=int)
+    per_page = 15 # As requested
+    offset = (page - 1) * per_page
+
     conn = get_db_connection()
     if not conn: return jsonify({"error": "Database connection failed."}), 500
     
     try:
         cursor = conn.cursor()
         search_query = f"%{major}%"
+        
+        # --- NEW: Query for the paged list of books ---
         cursor.execute(
             """
             SELECT
@@ -146,15 +156,30 @@ def get_by_major():
             LEFT JOIN authors a ON ba.author_id = a.author_id
             WHERE b.genre ILIKE %s
             ORDER BY b.rating DESC NULLS LAST
-            LIMIT 10
+            LIMIT %s OFFSET %s
             """,
+            (search_query, per_page, offset)
+        )
+        books = cursor.fetchall()
+        
+        # --- NEW: A second query to get the total count of books in the genre ---
+        cursor.execute(
+            "SELECT COUNT(*) FROM books WHERE genre ILIKE %s",
             (search_query,)
         )
-        results = cursor.fetchall()
-        return jsonify({'books': results})
+        total_books = cursor.fetchone()['count']
+        
+        # --- NEW: Return a structured object with pagination info ---
+        return jsonify({
+            'books': books,
+            'total_books': total_books,
+            'page': page,
+            'per_page': per_page
+        })
     finally:
         cursor.close()
         conn.close()
+
 
 # --- NEW: SIMILAR ITEMS ENDPOINT ---
 @app.route('/api/recommendations/similar-to/<int:book_id>', methods=['GET'])
