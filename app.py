@@ -63,7 +63,7 @@ def search_books():
             (search_query, search_query)
         )
         results = cursor.fetchall()
-        return jsonify(results) # Return a direct list
+        return jsonify({'books': results})
     finally:
         cursor.close()
         conn.close()
