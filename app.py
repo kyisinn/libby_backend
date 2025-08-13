@@ -70,20 +70,35 @@ def search_books():
 
 @app.route('/api/recommendations/globally-trending', methods=['GET'])
 def get_globally_trending():
-    """Gets top books published in the current month that have a cover."""
+    """
+    Gets top books by a given time period (weekly, monthly, yearly).
+    Defaults to the last 5 years if no period is specified.
+    """
+    # --- NEW: Get the time period from the request ---
+    period = request.args.get('period', '5years', type=str) # Default to '5years'
+    
     page = request.args.get('page', 1, type=int)
     per_page = 20 
     offset = (page - 1) * per_page
     
+    # --- NEW: Set the SQL interval based on the period parameter ---
+    if period == 'weekly':
+        interval_sql = "INTERVAL '7 days'"
+    elif period == 'monthly':
+        interval_sql = "INTERVAL '1 month'"
+    elif period == 'yearly':
+        interval_sql = "INTERVAL '1 year'"
+    else: # Default case
+        interval_sql = "INTERVAL '5 years'"
+
     conn = get_db_connection()
     if not conn: return jsonify({"error": "Database connection failed."}), 500
     
     try:
         cursor = conn.cursor()
-        # --- THIS IS THE UPDATED QUERY ---
-        # This query now filters for books published in the last five years.
-        cursor.execute(
-            """
+        
+        # --- UPDATED: The main and count queries are now dynamic ---
+        main_query = f"""
             SELECT
                 b.book_id AS id,
                 b.title,
@@ -91,27 +106,26 @@ def get_globally_trending():
                 b.rating,
                 COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
             FROM books b
-            LEFT JOIN
-                book_authors ba ON b.book_id = ba.book_id
-            LEFT JOIN
-                authors a ON ba.author_id = a.author_id
+            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
+            LEFT JOIN authors a ON ba.author_id = a.author_id
             WHERE
                 b.cover_image_url IS NOT NULL AND b.cover_image_url <> ''
-                AND b.publication_date >= CURRENT_DATE - INTERVAL '5 years'
+                AND b.publication_date >= CURRENT_DATE - {interval_sql}
             ORDER BY
                 b.publication_date DESC
             LIMIT %s OFFSET %s
-            """,
-            (per_page, offset)
-        )
-        results = cursor.fetchall()
+        """
         
-        # The count query must also match the new WHERE clause.
-        cursor.execute("""
+        count_query = f"""
             SELECT COUNT(*) FROM books 
             WHERE cover_image_url IS NOT NULL AND cover_image_url <> ''
-            AND publication_date >= CURRENT_DATE - INTERVAL '5 years'
-        """)
+            AND publication_date >= CURRENT_DATE - {interval_sql}
+        """
+
+        cursor.execute(main_query, (per_page, offset))
+        results = cursor.fetchall()
+        
+        cursor.execute(count_query)
         total_books = cursor.fetchone()['count']
         
         return jsonify({
