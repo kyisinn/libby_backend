@@ -9,6 +9,10 @@ import psycopg2
 import os
 from werkzeug.security import generate_password_hash, check_password_hash
 from psycopg2.extras import RealDictCursor
+# --- NEW IMPORTS for Content-Based Filtering ---
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import pandas as pd
 
 # Step 2: Create an instance of the Flask application
 app = Flask(__name__)
@@ -122,7 +126,7 @@ def get_globally_trending():
 
 @app.route('/api/recommendations/by-major', methods=['GET'])
 def get_by_major():
-    """Gets books by major and returns them in the standard paginated format."""
+    """Gets books by major and returns a simple list."""
     major = request.args.get('major', 'Computer Science', type=str)
     conn = get_db_connection()
     if not conn: return jsonify({"error": "Database connection failed."}), 500
@@ -132,22 +136,102 @@ def get_by_major():
         search_query = f"%{major}%"
         cursor.execute(
             """
-            SELECT b.book_id AS id, b.title, b.cover_image_url AS coverurl, a.first_name || ' ' || a.last_name AS author
-            FROM books b JOIN book_authors ba ON b.book_id = ba.book_id JOIN authors a ON ba.author_id = a.author_id
+            SELECT
+                b.book_id AS id,
+                b.title,
+                b.cover_image_url AS coverurl,
+                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
+            FROM books b
+            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
+            LEFT JOIN authors a ON ba.author_id = a.author_id
             WHERE b.genre ILIKE %s
-            ORDER BY b.rating DESC NULLS LAST LIMIT 10
+            ORDER BY b.rating DESC NULLS LAST
+            LIMIT 10
             """,
             (search_query,)
         )
         results = cursor.fetchall()
-        # --- THIS IS THE FIX ---
-        # This now correctly wraps the results in the standard object format.
-        return jsonify({
-            'books': results,
-            'total_books': len(results),
-            'page': 1,
-            'per_page': 10
-        })
+        return jsonify(results) # Return a direct list
+    finally:
+        cursor.close()
+        conn.close()
+
+# --- NEW: SIMILAR ITEMS ENDPOINT ---
+@app.route('/api/recommendations/similar-to/<int:book_id>', methods=['GET'])
+def get_similar_books(book_id):
+    """
+    Gets content-based recommendations for books similar to a given book_id.
+    This uses TF-IDF and Cosine Similarity based on book titles and genres.
+    """
+    conn = get_db_connection()
+    if not conn: return jsonify({"error": "Database connection failed."}), 500
+
+    try:
+        cursor = conn.cursor()
+        
+        # Step 1: Fetch all books to create the text corpus
+        cursor.execute("SELECT book_id, title, genre FROM books WHERE title IS NOT NULL AND genre IS NOT NULL")
+        all_books = cursor.fetchall()
+        
+        if not all_books:
+            return jsonify([])
+
+        # Convert to a pandas DataFrame for easier manipulation
+        df = pd.DataFrame(all_books)
+        df['content'] = df['title'] + ' ' + df['genre']
+        
+        # Check if the target book_id exists
+        if book_id not in df['book_id'].values:
+            return jsonify({"error": "Book not found in dataset for similarity calculation."}), 404
+
+        # Step 2: Calculate TF-IDF vectors
+        # Note: stop_words='english' removes common words like 'the', 'a', etc.
+        tfidf = TfidfVectorizer(stop_words='english')
+        tfidf_matrix = tfidf.fit_transform(df['content'])
+        
+        # Step 3: Compute Cosine Similarity
+        # Find the index of the book that matches the book_id
+        book_index = df.index[df['book_id'] == book_id].tolist()[0]
+        
+        # Get the pairwise similarity scores of all books with that book
+        cosine_sim = cosine_similarity(tfidf_matrix[book_index], tfidf_matrix)
+        
+        # Get the scores of the 10 most similar books
+        sim_scores = list(enumerate(cosine_sim[0]))
+        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+        sim_scores = sim_scores[1:11] # Get top 10, excluding the book itself
+
+        # Get the book indices
+        book_indices = [i[0] for i in sim_scores]
+        
+        # Get the book_ids from the original DataFrame
+        similar_book_ids = df['book_id'].iloc[book_indices].tolist()
+
+        if not similar_book_ids:
+            return jsonify([])
+
+        # Step 4: Fetch full details for the recommended books
+        # Use a placeholder string for the IN clause
+        placeholders = ','.join(['%s'] * len(similar_book_ids))
+        query = f"""
+            SELECT
+                b.book_id AS id,
+                b.title,
+                b.cover_image_url AS coverurl,
+                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
+            FROM books b
+            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
+            LEFT JOIN authors a ON ba.author_id = a.author_id
+            WHERE b.book_id IN ({placeholders})
+        """
+        cursor.execute(query, tuple(similar_book_ids))
+        results = cursor.fetchall()
+        
+        return jsonify(results)
+
+    except Exception as e:
+        print(f"Error in get_similar_books: {e}")
+        return jsonify({"error": "An internal error occurred."}), 500
     finally:
         cursor.close()
         conn.close()
