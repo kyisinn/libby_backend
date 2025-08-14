@@ -47,15 +47,6 @@ def get_db_connection():
 # ... (These remain the same)
 
 # --- Book-related Endpoints (Now returning simple lists) ---
-@app.get("/health")
-def health():
-    conn = get_db_connection()
-    if not conn: return jsonify({"ok": False}), 500
-    with conn.cursor() as cur:
-        cur.execute("SELECT 1")
-    conn.close()
-    return jsonify({"ok": True})
-
 
 @app.route('/api/search', methods=['GET'])
 def search_books():
