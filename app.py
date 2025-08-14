@@ -20,14 +20,26 @@ CORS(app)
 
 # --- PostgreSQL Database Connection ---
 def get_db_connection():
-    """A function to connect to the PostgreSQL database using the DATABASE_URL."""
+    """Create a PostgreSQL connection with sane defaults for Azure."""
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        # Fail fast with a clear message
+        raise RuntimeError("DATABASE_URL is not set in environment/app settings")
+
     try:
         conn = psycopg2.connect(
-            os.environ.get("DATABASE_URL"),
-            cursor_factory=RealDictCursor 
+            dsn,
+            cursor_factory=RealDictCursor,
+            sslmode="require",           # enforce TLS even if URL lacks it
+            connect_timeout=5,           # fail quickly if blocked by firewall
+            keepalives=1,                # keep connection alive on Azure
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5,
         )
         return conn
     except Exception as e:
+        # Log full error for diagnostics; return None so your handlers 500 gracefully
         print(f"Error connecting to PostgreSQL: {e}")
         return None
 
