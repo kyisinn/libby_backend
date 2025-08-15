@@ -1,324 +1,241 @@
-# app.py
-# FINAL VERSION: This API is fully powered by the PostgreSQL database
-# and has been updated to return simple lists for easier debugging.
+# =============================================================================
+# FLASK BOOK RECOMMENDATION API - MAIN BACKEND
+# =============================================================================
+# Main Flask application that handles all API endpoints and routing
 
-# Step 1: Import the necessary libraries
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import psycopg2 
-import os
 from werkzeug.security import generate_password_hash, check_password_hash
-from psycopg2.extras import RealDictCursor
-# --- NEW IMPORTS for Content-Based Filtering ---
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import pandas as pd
 
-# Step 2: Create an instance of the Flask application
+# Import our custom modules
+from database import (
+    search_books_db, 
+    get_trending_books_db, 
+    get_books_by_major_db, 
+    get_book_by_id_db,
+    get_similar_books_details
+)
+from cache import (
+    calculate_similar_books, 
+    refresh_similarity_cache, 
+    get_cache_stats,
+    get_cached_search,
+    cache_search_results
+)
+
+# =============================================================================
+# APPLICATION SETUP
+# =============================================================================
+
 app = Flask(__name__)
 CORS(app)
 
-# --- PostgreSQL Database Connection ---
-def get_db_connection():
-    """Create a PostgreSQL connection with sane defaults for Azure."""
-    dsn = os.environ.get("DATABASE_URL")
-    if not dsn:
-        # Fail fast with a clear message
-        raise RuntimeError("DATABASE_URL is not set in environment/app settings")
+# =============================================================================
+# USER AUTHENTICATION ENDPOINTS
+# =============================================================================
+# Note: Authentication endpoints would go here
+# (These remain the same as in your original code)
 
-    try:
-        conn = psycopg2.connect(
-            dsn,
-            cursor_factory=RealDictCursor,
-            sslmode="require",           # enforce TLS even if URL lacks it
-            connect_timeout=5,           # fail quickly if blocked by firewall
-            keepalives=1,                # keep connection alive on Azure
-            keepalives_idle=30,
-            keepalives_interval=10,
-            keepalives_count=5,
-        )
-        return conn
-    except Exception as e:
-        # Log full error for diagnostics; return None so your handlers 500 gracefully
-        print(f"Error connecting to PostgreSQL: {e}")
-        return None
-
-# --- User Authentication Endpoints ---
-# ... (These remain the same)
-
-# --- Book-related Endpoints (Now returning simple lists) ---
+# =============================================================================
+# BOOK SEARCH ENDPOINTS
+# =============================================================================
 
 @app.route('/api/search', methods=['GET'])
 def search_books():
-    """Searches for books and returns a simple list."""
-    query = request.args.get('q', '')
-    if not query: return jsonify([]) # Return empty list if no query
+    """Searches for books and returns a simple list with caching."""
+    query = request.args.get('q', '').strip()
+    if not query: 
+        return jsonify([])
     
-    conn = get_db_connection()
-    if not conn: return jsonify({"error": "Database connection failed."}), 500
+    # Check cache first
+    cached_results = get_cached_search(query)
+    if cached_results is not None:
+        return jsonify(cached_results)
     
-    try:
-        cursor = conn.cursor()
-        search_query = f"%{query}%"
-        cursor.execute(
-            """
-            SELECT
-                b.book_id AS id,
-                b.title,
-                b.cover_image_url AS coverurl,
-                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
-            FROM books b
-            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
-            LEFT JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.title ILIKE %s OR (a.first_name || ' ' || a.last_name) ILIKE %s
-            """,
-            (search_query, search_query)
-        )
-        results = cursor.fetchall()
-        return jsonify(results) # Return a direct list
-    finally:
-        cursor.close()
-        conn.close()
+    # Get from database
+    results = search_books_db(query)
+    if results is None:
+        return jsonify({"error": "Database connection failed."}), 500
+    
+    # Cache the results
+    cache_search_results(query, results)
+    
+    return jsonify(results)
+
+# =============================================================================
+# BOOK RECOMMENDATION ENDPOINTS
+# =============================================================================
 
 @app.route('/api/recommendations/globally-trending', methods=['GET'])
 def get_globally_trending():
-    """
-    Gets top books by a given time period (weekly, monthly, yearly).
-    Defaults to the last 5 years if no period is specified.
-    """
-    # --- NEW: Get the time period from the request ---
-    period = request.args.get('period', '5years', type=str) # Default to '5years'
-    
+    """Gets top books by time period with pagination."""
+    period = request.args.get('period', '5years', type=str)
     page = request.args.get('page', 1, type=int)
-    per_page = 20 
-    offset = (page - 1) * per_page
+    per_page = 20
     
-    # --- NEW: Set the SQL interval based on the period parameter ---
-    if period == 'weekly':
-        interval_sql = "INTERVAL '7 days'"
-    elif period == 'monthly':
-        interval_sql = "INTERVAL '1 month'"
-    elif period == 'yearly':
-        interval_sql = "INTERVAL '1 year'"
-    else: # Default case
-        interval_sql = "INTERVAL '5 years'"
-
-    conn = get_db_connection()
-    if not conn: return jsonify({"error": "Database connection failed."}), 500
+    result = get_trending_books_db(period, page, per_page)
+    if result is None:
+        return jsonify({"error": "Database connection failed."}), 500
     
-    try:
-        cursor = conn.cursor()
-        
-        # --- UPDATED: The main and count queries are now dynamic ---
-        main_query = f"""
-            SELECT
-                b.book_id AS id,
-                b.title,
-                b.cover_image_url AS coverurl,
-                b.rating,
-                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
-            FROM books b
-            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
-            LEFT JOIN authors a ON ba.author_id = a.author_id
-            WHERE
-                b.cover_image_url IS NOT NULL AND b.cover_image_url <> ''
-                AND b.publication_date >= CURRENT_DATE - {interval_sql}
-            ORDER BY
-                b.publication_date DESC
-            LIMIT %s OFFSET %s
-        """
-        
-        count_query = f"""
-            SELECT COUNT(*) FROM books 
-            WHERE cover_image_url IS NOT NULL AND cover_image_url <> ''
-            AND publication_date >= CURRENT_DATE - {interval_sql}
-        """
-
-        cursor.execute(main_query, (per_page, offset))
-        results = cursor.fetchall()
-        
-        cursor.execute(count_query)
-        total_books = cursor.fetchone()['count']
-        
-        return jsonify({
-            'books': results,
-            'total_books': total_books,
-            'page': page,
-            'per_page': per_page
-        })
-    finally:
-        cursor.close()
-        conn.close()
-
+    return jsonify({
+        'books': result['books'],
+        'total_books': result['total_books'],
+        'page': page,
+        'per_page': per_page
+    })
 
 @app.route('/api/recommendations/by-major', methods=['GET'])
 def get_by_major():
-    """
-    Gets books by major with pagination and returns a structured object.
-    """
+    """Gets books by major with pagination."""
     major = request.args.get('major', 'Computer Science', type=str)
-    # --- NEW: Get page number from request, default to 1 ---
     page = request.args.get('page', 1, type=int)
-    per_page = 15 # As requested
-    offset = (page - 1) * per_page
-
-    conn = get_db_connection()
-    if not conn: return jsonify({"error": "Database connection failed."}), 500
+    per_page = 15
     
-    try:
-        cursor = conn.cursor()
-        search_query = f"%{major}%"
-        
-        # --- NEW: Query for the paged list of books ---
-        cursor.execute(
-            """
-            SELECT
-                b.book_id AS id,
-                b.title,
-                b.cover_image_url AS coverurl,
-                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
-            FROM books b
-            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
-            LEFT JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.genre ILIKE %s
-            ORDER BY b.rating DESC NULLS LAST
-            LIMIT %s OFFSET %s
-            """,
-            (search_query, per_page, offset)
-        )
-        books = cursor.fetchall()
-        
-        # --- NEW: A second query to get the total count of books in the genre ---
-        cursor.execute(
-            "SELECT COUNT(*) FROM books WHERE genre ILIKE %s",
-            (search_query,)
-        )
-        total_books = cursor.fetchone()['count']
-        
-        # --- NEW: Return a structured object with pagination info ---
-        return jsonify({
-            'books': books,
-            'total_books': total_books,
-            'page': page,
-            'per_page': per_page
-        })
-    finally:
-        cursor.close()
-        conn.close()
+    result = get_books_by_major_db(major, page, per_page)
+    if result is None:
+        return jsonify({"error": "Database connection failed."}), 500
+    
+    return jsonify({
+        'books': result['books'],
+        'total_books': result['total_books'],
+        'page': page,
+        'per_page': per_page
+    })
 
+# =============================================================================
+# CONTENT-BASED SIMILARITY RECOMMENDATIONS
+# =============================================================================
 
-# --- NEW: SIMILAR ITEMS ENDPOINT ---
 @app.route('/api/recommendations/similar-to/<int:book_id>', methods=['GET'])
 def get_similar_books(book_id):
-    """
-    Gets content-based recommendations for books similar to a given book_id.
-    This uses TF-IDF and Cosine Similarity based on book titles and genres.
-    """
-    conn = get_db_connection()
-    if not conn: return jsonify({"error": "Database connection failed."}), 500
-
+    """Gets content-based recommendations using cached similarity calculations."""
     try:
-        cursor = conn.cursor()
+        similar_book_ids = calculate_similar_books(book_id)
         
-        # Step 1: Fetch all books to create the text corpus
-        cursor.execute("SELECT book_id, title, genre FROM books WHERE title IS NOT NULL AND genre IS NOT NULL")
-        all_books = cursor.fetchall()
-        
-        if not all_books:
-            return jsonify([])
-
-        # Convert to a pandas DataFrame for easier manipulation
-        df = pd.DataFrame(all_books)
-        df['content'] = df['title'] + ' ' + df['genre']
-        
-        # Check if the target book_id exists
-        if book_id not in df['book_id'].values:
+        if similar_book_ids is None:
             return jsonify({"error": "Book not found in dataset for similarity calculation."}), 404
-
-        # Step 2: Calculate TF-IDF vectors
-        # Note: stop_words='english' removes common words like 'the', 'a', etc.
-        tfidf = TfidfVectorizer(stop_words='english')
-        tfidf_matrix = tfidf.fit_transform(df['content'])
         
-        # Step 3: Compute Cosine Similarity
-        # Find the index of the book that matches the book_id
-        book_index = df.index[df['book_id'] == book_id].tolist()[0]
-        
-        # Get the pairwise similarity scores of all books with that book
-        cosine_sim = cosine_similarity(tfidf_matrix[book_index], tfidf_matrix)
-        
-        # Get the scores of the 10 most similar books
-        sim_scores = list(enumerate(cosine_sim[0]))
-        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
-        sim_scores = sim_scores[1:11] # Get top 10, excluding the book itself
-
-        # Get the book indices
-        book_indices = [i[0] for i in sim_scores]
-        
-        # Get the book_ids from the original DataFrame
-        similar_book_ids = df['book_id'].iloc[book_indices].tolist()
-
         if not similar_book_ids:
             return jsonify([])
 
-        # Step 4: Fetch full details for the recommended books
-        # Use a placeholder string for the IN clause
-        placeholders = ','.join(['%s'] * len(similar_book_ids))
-        query = f"""
-            SELECT
-                b.book_id AS id,
-                b.title,
-                b.cover_image_url AS coverurl,
-                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
-            FROM books b
-            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
-            LEFT JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.book_id IN ({placeholders})
-        """
-        cursor.execute(query, tuple(similar_book_ids))
-        results = cursor.fetchall()
+        # Get full details for the recommended books
+        results = get_similar_books_details(similar_book_ids)
+        if results is None:
+            return jsonify({"error": "Database connection failed."}), 500
         
         return jsonify(results)
 
     except Exception as e:
         print(f"Error in get_similar_books: {e}")
         return jsonify({"error": "An internal error occurred."}), 500
-    finally:
-        cursor.close()
-        conn.close()
+
+# =============================================================================
+# INDIVIDUAL BOOK ENDPOINTS
+# =============================================================================
 
 @app.route('/api/books/<int:book_id>', methods=['GET'])
 def get_book_by_id(book_id):
     """Gets all details for a single book by its ID."""
-    conn = get_db_connection()
-    if not conn: return jsonify({"error": "Database connection failed."}), 500
+    book = get_book_by_id_db(book_id)
+    
+    if book is None:
+        return jsonify({"error": "Database connection failed."}), 500
+    
+    if book:
+        # Transform the response format
+        book = dict(book)
+        book['id'] = book.pop('book_id')
+        book['coverurl'] = book.pop('cover_image_url')
+        return jsonify(book)
+    else:
+        return jsonify({"error": "Book not found"}), 404
 
+# =============================================================================
+# CACHE MANAGEMENT ENDPOINTS
+# =============================================================================
+
+@app.route('/api/admin/cache/refresh', methods=['POST'])
+def refresh_cache():
+    """Refresh the similarity calculation cache."""
     try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT
-                b.*,
-                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
-            FROM books b
-            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
-            LEFT JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.book_id = %s
-            """,
-            (book_id,)
-        )
-        book = cursor.fetchone()
+        refresh_similarity_cache()
+        return jsonify({"message": "Cache refreshed successfully"})
+    except Exception as e:
+        print(f"Error refreshing cache: {e}")
+        return jsonify({"error": "Failed to refresh cache"}), 500
 
-        if book:
-            book['id'] = book.pop('book_id')
-            book['coverurl'] = book.pop('cover_image_url')
-            return jsonify(book)
+@app.route('/api/admin/cache/stats', methods=['GET'])
+def cache_stats():
+    """Get cache statistics."""
+    try:
+        stats = get_cache_stats()
+        return jsonify(stats)
+    except Exception as e:
+        print(f"Error getting cache stats: {e}")
+        return jsonify({"error": "Failed to get cache stats"}), 500
+
+# =============================================================================
+# HEALTH CHECK ENDPOINTS
+# =============================================================================
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Basic health check endpoint."""
+    return jsonify({
+        "status": "healthy",
+        "service": "book-recommendation-api",
+        "version": "1.0.0"
+    })
+
+@app.route('/api/health/detailed', methods=['GET'])
+def detailed_health_check():
+    """Detailed health check with database connectivity."""
+    try:
+        # Test database connection
+        from database import get_db_connection
+        conn = get_db_connection()
+        if conn:
+            conn.close()
+            db_status = "connected"
         else:
-            return jsonify({"error": "Book not found"}), 404
-    finally:
-        cursor.close()
-        conn.close()
+            db_status = "failed"
+        
+        # Get cache stats
+        cache_stats_data = get_cache_stats()
+        
+        return jsonify({
+            "status": "healthy" if db_status == "connected" else "degraded",
+            "service": "book-recommendation-api",
+            "version": "1.0.0",
+            "database": db_status,
+            "cache": cache_stats_data
+        })
+    except Exception as e:
+        print(f"Health check error: {e}")
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e)
+        }), 500
 
-# Step 5: Run the Flask Application
+# =============================================================================
+# ERROR HANDLERS
+# =============================================================================
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Endpoint not found"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"error": "Internal server error"}), 500
+
+@app.errorhandler(400)
+def bad_request(error):
+    return jsonify({"error": "Bad request"}), 400
+
+# =============================================================================
+# APPLICATION RUNNER
+# =============================================================================
+
 if __name__ == '__main__':
     app.run(debug=True)
