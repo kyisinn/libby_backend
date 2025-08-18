@@ -8,6 +8,7 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 import os, datetime, jwt
 from functools import wraps
+from cache import init_cache
 
 # Import our custom modules
 from database import (
@@ -24,6 +25,7 @@ from database import (
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False)
+cache = init_cache(app)
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
 JWT_EXPIRES_DAYS = int(os.getenv("JWT_EXPIRES_DAYS", "7"))
@@ -153,6 +155,8 @@ def auth_me():
 # =============================================================================
 
 @app.route('/api/search', methods=['GET'])
+@cache.cached(timeout=180, query_string=True)
+
 def search_books():
     """Searches for books and returns a simple list."""
     query = request.args.get('q', '').strip()
@@ -171,6 +175,8 @@ def search_books():
 # =============================================================================
 
 @app.route('/api/recommendations/globally-trending', methods=['GET'])
+@cache.cached(timeout=600, query_string=True)
+
 def get_globally_trending():
     """Gets top books by time period with pagination."""
     period = request.args.get('period', '5years', type=str)
@@ -189,6 +195,8 @@ def get_globally_trending():
     })
 
 @app.route('/api/recommendations/by-major', methods=['GET'])
+@cache.cached(timeout=600, query_string=True)
+
 def get_by_major():
     """Gets books by major with pagination."""
     major = request.args.get('major', 'Computer Science', type=str)
@@ -211,6 +219,8 @@ def get_by_major():
 # =============================================================================
 
 @app.route('/api/recommendations/similar-to/<int:book_id>', methods=['GET'])
+
+
 def get_similar_books(book_id):
     """Gets content-based recommendations (simplified without cache)."""
     try:
@@ -236,6 +246,8 @@ def get_similar_books(book_id):
 # =============================================================================
 
 @app.route('/api/books/<int:book_id>', methods=['GET'])
+@cache.cached(timeout=1800)
+
 def get_book_by_id(book_id):
     """Gets all details for a single book by its ID."""
     book = get_book_by_id_db(book_id)
@@ -302,6 +314,35 @@ def internal_error(error):
 @app.errorhandler(400)
 def bad_request(error):
     return jsonify({"error": "Bad request"}), 400
+
+# =============================================================================
+# HEALTH CHECKS WITH CACHE
+# =============================================================================
+
+@app.route('/api/health/detailed', methods=['GET'])
+def detailed_health_check():
+    try:
+        from database import get_db_connection
+        conn = get_db_connection()
+        db_ok = bool(conn)
+        if conn: conn.close()
+
+        cache_ok = True
+        if app.config.get("CACHE_TYPE") == "RedisCache":
+            try:
+                cache.set("health:ping", "pong", timeout=5)
+                cache_ok = cache.get("health:ping") == "pong"
+            except Exception:
+                cache_ok = False
+
+        status = "healthy" if (db_ok and cache_ok) else "degraded"
+        return jsonify({
+            "status": status,
+            "database": "connected" if db_ok else "failed",
+            "cache": "connected" if cache_ok else "failed",
+        })
+    except Exception as e:
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 # =============================================================================
 # APPLICATION RUNNER
