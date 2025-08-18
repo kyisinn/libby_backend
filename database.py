@@ -84,14 +84,23 @@ def get_trending_books_db(period, page, per_page):
     
     offset = (page - 1) * per_page
     
-    # Set the SQL interval based on the period parameter
-    if period == 'weekly':
+    # Fix the period parameter mapping
+    if period == 'weekly' or period == '1week':
         interval_sql = "INTERVAL '7 days'"
-    elif period == 'monthly':
+    elif period == 'monthly' or period == '1month':
         interval_sql = "INTERVAL '1 month'"
-    elif period == 'yearly':
+    elif period == '3months':
+        interval_sql = "INTERVAL '3 months'"
+    elif period == '6months':
+        interval_sql = "INTERVAL '6 months'"
+    elif period == 'yearly' or period == '1year':
         interval_sql = "INTERVAL '1 year'"
+    elif period == '2years':
+        interval_sql = "INTERVAL '2 years'"
+    elif period == '5years':
+        interval_sql = "INTERVAL '5 years'"
     else:
+        # Default to 5 years for unknown periods
         interval_sql = "INTERVAL '5 years'"
 
     try:
@@ -111,6 +120,7 @@ def get_trending_books_db(period, page, per_page):
                 b.cover_image_url IS NOT NULL AND b.cover_image_url <> ''
                 AND b.publication_date >= CURRENT_DATE - {interval_sql}
             ORDER BY
+                b.rating DESC NULLS LAST,
                 b.publication_date DESC
             LIMIT %s OFFSET %s
         """
@@ -133,57 +143,7 @@ def get_trending_books_db(period, page, per_page):
         }
     except Exception as e:
         print(f"Error in get_trending_books_db: {e}")
-        return None
-    finally:
-        cursor.close()
-        conn.close()
-
-# =============================================================================
-# BOOKS BY MAJOR OPERATIONS
-# =============================================================================
-
-def get_books_by_major_db(major, page, per_page):
-    """Get books by major with pagination."""
-    conn = get_db_connection()
-    if not conn:
-        return None
-    
-    offset = (page - 1) * per_page
-    
-    try:
-        cursor = conn.cursor()
-        search_query = f"%{major}%"
-        
-        cursor.execute(
-            """
-            SELECT
-                b.book_id AS id,
-                b.title,
-                b.cover_image_url AS coverurl,
-                COALESCE(a.first_name || ' ' || a.last_name, 'Unknown Author') AS author
-            FROM books b
-            LEFT JOIN book_authors ba ON b.book_id = ba.book_id
-            LEFT JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.genre ILIKE %s
-            ORDER BY b.rating DESC NULLS LAST
-            LIMIT %s OFFSET %s
-            """,
-            (search_query, per_page, offset)
-        )
-        books = cursor.fetchall()
-        
-        cursor.execute(
-            "SELECT COUNT(*) FROM books WHERE genre ILIKE %s",
-            (search_query,)
-        )
-        total_books = cursor.fetchone()['count']
-        
-        return {
-            'books': books,
-            'total_books': total_books
-        }
-    except Exception as e:
-        print(f"Error in get_books_by_major_db: {e}")
+        print(f"Period requested: {period}, SQL interval: {interval_sql}")  # Debug info
         return None
     finally:
         cursor.close()
