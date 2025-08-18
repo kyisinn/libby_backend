@@ -19,25 +19,22 @@ def get_db_connection():
     dsn = os.getenv("DATABASE_URL")
     if not dsn:
         raise RuntimeError("DATABASE_URL is not set in environment/app settings")
-
     try:
-        # Check if we need SSL (for cloud databases like Azure)
-        ssl_mode = "require" if "azure" in dsn.lower() or "amazonaws" in dsn.lower() else "prefer"
-        
-        conn = psycopg2.connect(
-            dsn,
-            cursor_factory=RealDictCursor,
-            sslmode=ssl_mode,
-            connect_timeout=10,
-            keepalives=1,
-            keepalives_idle=30,
-            keepalives_interval=10,
-            keepalives_count=5,
-        )
-        return conn
+            conn = psycopg2.connect(
+                dsn,
+                cursor_factory=RealDictCursor,
+                sslmode="require",           # enforce TLS even if URL lacks it
+                connect_timeout=5,           # fail quickly if blocked by firewall
+                keepalives=1,                # keep connection alive on Azure
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
+            )
+            return conn
     except Exception as e:
-        print(f"Error connecting to PostgreSQL: {e}")
-        return None
+            print(f"Error connecting to PostgreSQL: {e}")
+            return None
+
 
 # =============================================================================
 # BOOK SEARCH OPERATIONS
@@ -382,6 +379,75 @@ def get_book_by_id_db(book_id):
         return book
     except Exception as e:
         print(f"Error in get_book_by_id_db: {e}")
+        return None
+    finally:
+        cursor.close()
+        conn.close()
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def test_db_connection():
+    """Test database connection and return status."""
+    conn = get_db_connection()
+    if not conn:
+        return {"status": "failed", "error": "Could not establish connection"}
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 as test")
+        result = cursor.fetchone()
+        
+        # Get some basic stats
+        cursor.execute("SELECT COUNT(*) as total_books FROM books")
+        book_count = cursor.fetchone()['total_books']
+        
+        return {
+            "status": "connected",
+            "database": "PostgreSQL",
+            "total_books": book_count
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+    finally:
+        cursor.close()
+        conn.close()
+
+def get_database_stats():
+    """Get basic database statistics."""
+    conn = get_db_connection()
+    if not conn:
+        return None
+    
+    try:
+        cursor = conn.cursor()
+        stats = {}
+        
+        # Total books
+        cursor.execute("SELECT COUNT(*) as count FROM books")
+        stats['total_books'] = cursor.fetchone()['count']
+        
+        # Books with covers
+        cursor.execute("SELECT COUNT(*) as count FROM books WHERE cover_image_url IS NOT NULL AND cover_image_url <> ''")
+        stats['books_with_covers'] = cursor.fetchone()['count']
+        
+        # Books with ratings
+        cursor.execute("SELECT COUNT(*) as count FROM books WHERE rating IS NOT NULL")
+        stats['books_with_ratings'] = cursor.fetchone()['count']
+        
+        # Average rating
+        cursor.execute("SELECT AVG(rating) as avg_rating FROM books WHERE rating IS NOT NULL")
+        avg_rating = cursor.fetchone()['avg_rating']
+        stats['average_rating'] = round(float(avg_rating), 2) if avg_rating else 0
+        
+        # Total authors
+        cursor.execute("SELECT COUNT(*) as count FROM authors")
+        stats['total_authors'] = cursor.fetchone()['count']
+        
+        return stats
+    except Exception as e:
+        print(f"Error getting database stats: {e}")
         return None
     finally:
         cursor.close()
