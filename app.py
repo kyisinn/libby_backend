@@ -3,8 +3,11 @@
 # =============================================================================
 # Main Flask application that handles all API endpoints and routing
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, g
 from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
+import os, datetime, jwt
+from functools import wraps
 
 # Import our custom modules
 from database import (
@@ -20,13 +23,130 @@ from database import (
 # =============================================================================
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False)
+
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
+JWT_EXPIRES_DAYS = int(os.getenv("JWT_EXPIRES_DAYS", "7"))
+
+def create_jwt(user_id: int, email: str) -> str:
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "iat": datetime.datetime.utcnow(),
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(days=JWT_EXPIRES_DAYS)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+def auth_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Missing or invalid Authorization header"}), 401
+        token = auth_header.split(" ", 1)[1].strip()
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+            g.user_id = payload.get("sub")
+            g.email = payload.get("email")
+            if not g.user_id:
+                return jsonify({"error": "Invalid token"}), 401
+        except jwt.ExpiredSignatureError:
+            return jsonify({"error": "Token expired"}), 401
+        except Exception as e:
+            print("JWT decode error:", e)
+            return jsonify({"error": "Invalid token"}), 401
+        return fn(*args, **kwargs)
+    return wrapper
 
 # =============================================================================
 # USER AUTHENTICATION ENDPOINTS
 # =============================================================================
-# Note: Authentication endpoints would go here
-# (These remain the same as in your original code)
+from database import get_user_by_email, create_user, get_user_by_id
+
+@app.route("/api/auth/signup", methods=["POST"])
+def auth_signup():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip()
+    password = data.get("password") or ""
+    first_name = (data.get("first_name") or "").strip() or None
+    last_name  = (data.get("last_name") or "").strip() or None
+    phone      = (data.get("phone") or "").strip() or None
+
+    if not email or not password:
+        return jsonify({"error": "Email and password are required"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+
+    # Check existing user
+    existing = get_user_by_email(email)
+    if existing:
+        return jsonify({"error": "Email already in use"}), 409
+
+    pwd_hash = generate_password_hash(password)
+    created = create_user(email, pwd_hash, first_name, last_name, phone)
+    if created is None:
+        return jsonify({"error": "Database error creating user"}), 500
+    if isinstance(created, dict) and created.get("_duplicate"):
+        return jsonify({"error": "Email already in use"}), 409
+
+    token = create_jwt(created["user_id"], created["email"])
+    return jsonify({
+        "token": token,
+        "user": {
+            "user_id": created["user_id"],
+            "email": created["email"],
+            "first_name": created.get("first_name"),
+            "last_name": created.get("last_name"),
+            "phone": created.get("phone"),
+            "membership_type": created.get("membership_type"),
+            "is_active": created.get("is_active"),
+            "created_at": created["created_at"].isoformat() if created.get("created_at") else None
+        }
+    }), 201
+
+@app.route("/api/auth/login", methods=["POST"])
+def auth_login():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip()
+    password = data.get("password") or ""
+    if not email or not password:
+        return jsonify({"error": "Email and password are required"}), 400
+
+    user = get_user_by_email(email)
+    if not user or not check_password_hash(user["password_hash"], password):
+        return jsonify({"error": "Invalid credentials"}), 401
+
+    token = create_jwt(user["user_id"], user["email"])
+    return jsonify({
+        "token": token,
+        "user": {
+            "user_id": user["user_id"],
+            "email": user["email"],
+            "first_name": user.get("first_name"),
+            "last_name": user.get("last_name"),
+            "phone": user.get("phone"),
+            "membership_type": user.get("membership_type"),
+            "is_active": user.get("is_active"),
+            "created_at": user.get("created_at").isoformat() if user.get("created_at") else None
+        }
+    }), 200
+
+@app.route("/api/auth/me", methods=["GET"])
+@auth_required
+def auth_me():
+    user = get_user_by_id(g.user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({
+        "user_id": user["user_id"],
+        "email": user["email"],
+        "first_name": user.get("first_name"),
+        "last_name": user.get("last_name"),
+        "phone": user.get("phone"),
+        "membership_type": user.get("membership_type"),
+        "is_active": user.get("is_active"),
+        "created_at": user.get("created_at").isoformat() if user.get("created_at") else None
+    }), 200
 
 # =============================================================================
 # BOOK SEARCH ENDPOINTS
@@ -124,11 +244,7 @@ def get_book_by_id(book_id):
         return jsonify({"error": "Database connection failed."}), 500
     
     if book:
-        # Transform the response format
-        book = dict(book)
-        book['book_id'] = book.pop('book_id')
-        book['cover_image_url'] = book.pop('cover_image_url')
-        return jsonify(book)
+        return jsonify(dict(book))
     else:
         return jsonify({"error": "Book not found"}), 404
 
