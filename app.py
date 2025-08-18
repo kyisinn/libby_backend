@@ -126,8 +126,8 @@ def get_book_by_id(book_id):
     if book:
         # Transform the response format
         book = dict(book)
-        book['id'] = book.pop('book_id')
-        book['coverurl'] = book.pop('cover_image_url')
+        book['book_id'] = book.pop('book_id')
+        book['cover_image_url'] = book.pop('cover_image_url')
         return jsonify(book)
     else:
         return jsonify({"error": "Book not found"}), 404
