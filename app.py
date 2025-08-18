@@ -273,52 +273,8 @@ def health_check():
         "version": "1.0.0"
     })
 
-@app.route('/api/health/detailed', methods=['GET'])
-def detailed_health_check():
-    """Detailed health check with database connectivity."""
-    try:
-        # Test database connection
-        from database import get_db_connection
-        conn = get_db_connection()
-        if conn:
-            conn.close()
-            db_status = "connected"
-        else:
-            db_status = "failed"
-        
-        return jsonify({
-            "status": "healthy" if db_status == "connected" else "degraded",
-            "service": "book-recommendation-api",
-            "version": "1.0.0",
-            "database": db_status
-        })
-    except Exception as e:
-        print(f"Health check error: {e}")
-        return jsonify({
-            "status": "unhealthy",
-            "error": str(e)
-        }), 500
 
-# =============================================================================
-# ERROR HANDLERS
-# =============================================================================
-
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({"error": "Endpoint not found"}), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({"error": "Internal server error"}), 500
-
-@app.errorhandler(400)
-def bad_request(error):
-    return jsonify({"error": "Bad request"}), 400
-
-# =============================================================================
-# HEALTH CHECKS WITH CACHE
-# =============================================================================
-
+    
 @app.route('/api/health/detailed', methods=['GET'])
 def detailed_health_check():
     try:
@@ -343,6 +299,23 @@ def detailed_health_check():
         })
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
+# =============================================================================
+# ERROR HANDLERS
+# =============================================================================
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Endpoint not found"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"error": "Internal server error"}), 500
+
+@app.errorhandler(400)
+def bad_request(error):
+    return jsonify({"error": "Bad request"}), 400
+
 
 # =============================================================================
 # APPLICATION RUNNER
