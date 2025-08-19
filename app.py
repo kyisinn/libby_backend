@@ -30,7 +30,17 @@ CORS(
         r"/api/*": {
             "origins": ["https://libby-bot.vercel.app"],
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["Authorization", "Content-Type"],
+            # be permissive for headers so the proxy never strips them
+            "allow_headers": [
+                "*",
+                "Authorization",
+                "authorization",
+                "Http-Authorization",
+                "HTTP_AUTHORIZATION",
+                "X-Authorization",
+                "X-Forwarded-Authorization",
+                "Content-Type",
+            ],
             "expose_headers": ["Content-Type"],
         }
     },
@@ -53,15 +63,33 @@ def create_jwt(user_id: int, email: str) -> str:
 def auth_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        auth_header = request.headers.get("Authorization", "") or ""
-        parts = auth_header.strip().split()
+        # Try common places a proxy might put the auth header
+        auth_header = (
+            request.headers.get("Authorization")
+            or request.headers.get("authorization")
+            or request.headers.get("X-Authorization")
+            or request.headers.get("X-Forwarded-Authorization")
+            or request.headers.get("Http-Authorization")
+            or request.headers.get("HTTP_AUTHORIZATION")
+            or request.environ.get("HTTP_AUTHORIZATION")
+            or ""
+        )
+        auth_header = auth_header.strip()
+        if not auth_header:
+            print("[auth] Missing Authorization header. Headers seen:", dict(request.headers))
+            return jsonify({"error": "Missing or invalid Authorization header"}), 401
+
+        parts = auth_header.split()
         # Expect exactly two parts: Bearer <token>
         if len(parts) != 2 or parts[0].lower() != "bearer":
+            print("[auth] Bad Authorization format:", auth_header)
             return jsonify({"error": "Missing or invalid Authorization header"}), 401
 
         token = parts[1].strip()
         if not token:
+            print("[auth] Empty token in Authorization header")
             return jsonify({"error": "Missing or invalid Authorization header"}), 401
+
         try:
             payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
             g.user_id = payload.get("sub")
@@ -69,10 +97,13 @@ def auth_required(fn):
             if not g.user_id:
                 return jsonify({"error": "Invalid token"}), 401
         except jwt.ExpiredSignatureError:
+            print("JWT decode error: Token expired")
             return jsonify({"error": "Token expired"}), 401
+        except jwt.InvalidSignatureError:
+            print("JWT decode error: Invalid signature (JWT_SECRET mismatch?)")
+            return jsonify({"error": "Invalid token signature"}), 401
         except Exception as e:
-            # Log the concrete decode error to help diagnose 401s in production logs
-            print("JWT decode error:", repr(e))
+            print("JWT decode error (other):", repr(e))
             return jsonify({"error": "Invalid token"}), 401
         return fn(*args, **kwargs)
     return wrapper
@@ -199,6 +230,9 @@ def delete_account():
     # ... delete user & related rows ...
     return jsonify({'ok': True}), 200
 
+@app.route("/api/_debug/headers", methods=["GET"])
+def debug_headers():
+    return jsonify({k: v for k, v in request.headers.items()})
 
 # =============================================================================
 # BOOK SEARCH ENDPOINTS
