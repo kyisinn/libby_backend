@@ -53,10 +53,15 @@ def create_jwt(user_id: int, email: str) -> str:
 def auth_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
+        auth_header = request.headers.get("Authorization", "") or ""
+        parts = auth_header.strip().split()
+        # Expect exactly two parts: Bearer <token>
+        if len(parts) != 2 or parts[0].lower() != "bearer":
             return jsonify({"error": "Missing or invalid Authorization header"}), 401
-        token = auth_header.split(" ", 1)[1].strip()
+
+        token = parts[1].strip()
+        if not token:
+            return jsonify({"error": "Missing or invalid Authorization header"}), 401
         try:
             payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
             g.user_id = payload.get("sub")
@@ -66,7 +71,8 @@ def auth_required(fn):
         except jwt.ExpiredSignatureError:
             return jsonify({"error": "Token expired"}), 401
         except Exception as e:
-            print("JWT decode error:", e)
+            # Log the concrete decode error to help diagnose 401s in production logs
+            print("JWT decode error:", repr(e))
             return jsonify({"error": "Invalid token"}), 401
         return fn(*args, **kwargs)
     return wrapper
