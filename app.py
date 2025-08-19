@@ -24,7 +24,18 @@ from database import (
 # =============================================================================
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False)
+CORS(
+    app,
+    resources={
+        r"/api/*": {
+            "origins": ["https://libby-bot.vercel.app"],
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Authorization", "Content-Type"],
+            "expose_headers": ["Content-Type"],
+        }
+    },
+    supports_credentials=False,
+)
 cache = init_cache(app)
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
