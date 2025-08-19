@@ -109,6 +109,22 @@ def create_user(email: str, password_hash: str,
     finally:
         conn.close()
 
+def update_user_full_name(user_id: int, full_name: str) -> bool:
+  conn = get_db_connection()
+  if not conn:
+    return False
+  try:
+    with conn.cursor() as cur:
+      cur.execute("UPDATE users SET full_name = %s WHERE user_id = %s", (full_name, user_id))
+      conn.commit()
+      return True
+  except Exception as e:
+    print("update_user_full_name error:", e)
+    return False
+  finally:
+    conn.close()
+
+
 # -----------------------------------------------------------------------------
 # BOOK SEARCH
 # -----------------------------------------------------------------------------

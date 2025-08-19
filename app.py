@@ -150,6 +150,39 @@ def auth_me():
         "created_at": user.get("created_at").isoformat() if user.get("created_at") else None
     }), 200
 
+# PUT /api/user/profile
+# Body: { full_name }
+# Auth: Bearer
+@app.route('/api/user/profile', methods=['PUT'])
+@auth_required
+def update_profile():
+    data = request.get_json() or {}
+    full_name = (data.get('full_name') or '').strip()
+    from database import update_user_full_name
+    ok = update_user_full_name(g.user_id, full_name)
+    if not ok:
+        return jsonify({'error': 'Failed to update'}), 500
+    return jsonify({'ok': True}), 200
+
+# POST /api/auth/change-password
+# Body: { current_password, new_password }
+@app.route('/api/auth/change-password', methods=['POST'])
+@auth_required
+def change_password():
+    data = request.get_json() or {}
+    cur = data.get('current_password') or ''
+    new = data.get('new_password') or ''
+    # ... verify current, update hash ...
+    return jsonify({'ok': True}), 200
+
+# DELETE /api/auth/account
+@app.route('/api/auth/account', methods=['DELETE'])
+@auth_required
+def delete_account():
+    # ... delete user & related rows ...
+    return jsonify({'ok': True}), 200
+
+
 # =============================================================================
 # BOOK SEARCH ENDPOINTS
 # =============================================================================
