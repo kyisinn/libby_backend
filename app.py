@@ -42,9 +42,10 @@ CORS(
                 "Content-Type",
             ],
             "expose_headers": ["Content-Type"],
+            "supports_credentials": True,  # Allow cookies to be sent
         }
     },
-    supports_credentials=False,
+    supports_credentials=True,  # Allow cookies to be sent
 )
 cache = init_cache(app)
 
@@ -80,32 +81,37 @@ def clear_jwt_cookie(response):
 def auth_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        # Try common places a proxy might put the auth header
-        auth_header = (
-            request.headers.get("Authorization")
-            or request.headers.get("authorization")
-            or request.headers.get("X-Authorization")
-            or request.headers.get("X-Forwarded-Authorization")
-            or request.headers.get("Http-Authorization")
-            or request.headers.get("HTTP_AUTHORIZATION")
-            or request.environ.get("HTTP_AUTHORIZATION")
-            or ""
-        )
-        auth_header = auth_header.strip()
-        if not auth_header:
-            print("[auth] Missing Authorization header. Headers seen:", dict(request.headers))
-            return jsonify({"error": "Missing or invalid Authorization header"}), 401
-
-        parts = auth_header.split()
-        # Expect exactly two parts: Bearer <token>
-        if len(parts) != 2 or parts[0].lower() != "bearer":
-            print("[auth] Bad Authorization format:", auth_header)
-            return jsonify({"error": "Missing or invalid Authorization header"}), 401
-
-        token = parts[1].strip()
+        # First check for JWT in cookie
+        token = request.cookies.get('jwt_token')
+        
+        # If no cookie, fall back to Authorization header
         if not token:
-            print("[auth] Empty token in Authorization header")
-            return jsonify({"error": "Missing or invalid Authorization header"}), 401
+            auth_header = (
+                request.headers.get("Authorization")
+                or request.headers.get("authorization")
+                or request.headers.get("X-Authorization")
+                or request.headers.get("X-Forwarded-Authorization")
+                or request.headers.get("Http-Authorization")
+                or request.headers.get("HTTP_AUTHORIZATION")
+                or request.environ.get("HTTP_AUTHORIZATION")
+                or ""
+            )
+            auth_header = auth_header.strip()
+            if not auth_header:
+                print("[auth] No JWT cookie or Authorization header found")
+                return jsonify({"error": "Authentication required"}), 401
+
+            parts = auth_header.split()
+            # Expect exactly two parts: Bearer <token>
+            if len(parts) != 2 or parts[0].lower() != "bearer":
+                print("[auth] Bad Authorization format:", auth_header)
+                return jsonify({"error": "Invalid Authorization format"}), 401
+                
+            token = parts[1].strip()
+
+        if not token:
+            print("[auth] Empty token")
+            return jsonify({"error": "Authentication required"}), 401
 
         try:
             payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
