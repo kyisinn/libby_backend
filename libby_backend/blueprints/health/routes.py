@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify, current_app
-from ...extensions import cache
+from libby_backend.extensions import cache
 
 bp = Blueprint("health", __name__, url_prefix="/api")
 

@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify, request
-from ...database import (
+from libby_backend.database import (
     search_books_db, get_trending_books_db, get_books_by_major_db, get_book_by_id_db
 )
 from ...extensions import cache
@@ -8,6 +8,7 @@ bp = Blueprint("books", __name__, url_prefix="/api")
 
 @bp.get("/search")
 @cache.cached(timeout=180, query_string=True)
+
 def search_books():
     q = request.args.get("q", "").strip()
     if not q:

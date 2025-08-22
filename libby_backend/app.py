@@ -3,7 +3,7 @@
 # =============================================================================
 from flask import Flask, jsonify
 from flask_cors import CORS
-from cache import init_cache
+from libby_backend.cache import init_cache
 
 # =============================================================================
 # APPLICATION SETUP
@@ -65,7 +65,7 @@ def health_check():
 @app.route('/api/health/detailed', methods=['GET'])
 def detailed_health_check():
     try:
-        from database import get_db_connection
+        from libby_backend.database import get_db_connection
         conn = get_db_connection()
         db_ok = bool(conn)
         if conn:

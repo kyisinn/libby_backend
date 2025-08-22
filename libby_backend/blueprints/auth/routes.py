@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request, g
 from werkzeug.security import generate_password_hash, check_password_hash
-from ...database import get_user_by_email, create_user, get_user_by_id
+from libby_backend.database import get_user_by_email, create_user, get_user_by_id
 from ...utils.auth import auth_required, set_jwt_cookie, clear_jwt_cookie
 
 bp = Blueprint("auth", __name__, url_prefix="/api/auth")
