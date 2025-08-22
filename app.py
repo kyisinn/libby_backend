@@ -63,19 +63,29 @@ def create_jwt(user_id: int, email: str) -> str:
 
 def set_jwt_cookie(response, user_id: int, email: str):
     token = create_jwt(user_id, email)
+    is_production = os.getenv('FLASK_ENV') == 'production'
     response.set_cookie(
         'jwt_token',
         token,
         httponly=True,
-        secure=True,  # Only send cookie over HTTPS
-        samesite='Lax',  # Protect against CSRF
+        secure=is_production,  # Only require HTTPS in production
+        samesite='None' if is_production else 'Lax',  # Allow cross-site in production
         max_age=JWT_EXPIRES_DAYS * 24 * 60 * 60,  # Convert days to seconds
         path='/'
     )
     return response
 
 def clear_jwt_cookie(response):
-    response.set_cookie('jwt_token', '', expires=0, httponly=True, secure=True, samesite='Lax', path='/')
+    is_production = os.getenv('FLASK_ENV') == 'production'
+    response.set_cookie(
+        'jwt_token', 
+        '', 
+        expires=0, 
+        httponly=True, 
+        secure=is_production,  # Only require HTTPS in production
+        samesite='None' if is_production else 'Lax',  # Allow cross-site in production
+        path='/'
+    )
     return response
 
 def auth_required(fn):
@@ -183,29 +193,6 @@ def auth_login():
 
     response = jsonify({"message": "Login successful"})
     return set_jwt_cookie(response, user["user_id"], user["email"])
-    email = (data.get("email") or "").strip()
-    password = data.get("password") or ""
-    if not email or not password:
-        return jsonify({"error": "Email and password are required"}), 400
-
-    user = get_user_by_email(email)
-    if not user or not check_password_hash(user["password_hash"], password):
-        return jsonify({"error": "Invalid credentials"}), 401
-
-    token = create_jwt(user["user_id"], user["email"])
-    return jsonify({
-        "token": token,
-        "user": {
-            "user_id": user["user_id"],
-            "email": user["email"],
-            "first_name": user.get("first_name"),
-            "last_name": user.get("last_name"),
-            "phone": user.get("phone"),
-            "membership_type": user.get("membership_type"),
-            "is_active": user.get("is_active"),
-            "created_at": user.get("created_at").isoformat() if user.get("created_at") else None
-        }
-    }), 200
 
 @app.route("/api/auth/logout", methods=["POST"])
 @auth_required
