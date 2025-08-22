@@ -60,6 +60,23 @@ def create_jwt(user_id: int, email: str) -> str:
     }
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
+def set_jwt_cookie(response, user_id: int, email: str):
+    token = create_jwt(user_id, email)
+    response.set_cookie(
+        'jwt_token',
+        token,
+        httponly=True,
+        secure=True,  # Only send cookie over HTTPS
+        samesite='Lax',  # Protect against CSRF
+        max_age=JWT_EXPIRES_DAYS * 24 * 60 * 60,  # Convert days to seconds
+        path='/'
+    )
+    return response
+
+def clear_jwt_cookie(response):
+    response.set_cookie('jwt_token', '', expires=0, httponly=True, secure=True, samesite='Lax', path='/')
+    return response
+
 def auth_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -127,36 +144,39 @@ def auth_signup():
     if len(password) < 6:
         return jsonify({"error": "Password must be at least 6 characters"}), 400
 
-    # Check existing user
+        # Check existing user
     existing = get_user_by_email(email)
     if existing:
-        return jsonify({"error": "Email already in use"}), 409
+        return jsonify({"error": "Email already registered"}), 400
 
     pwd_hash = generate_password_hash(password)
     created = create_user(email, pwd_hash, first_name, last_name, phone)
     if created is None:
-        return jsonify({"error": "Database error creating user"}), 500
+        return jsonify({"error": "Failed to create user"}), 500
     if isinstance(created, dict) and created.get("_duplicate"):
-        return jsonify({"error": "Email already in use"}), 409
+        return jsonify({"error": "Email already registered"}), 400
 
-    token = create_jwt(created["user_id"], created["email"])
-    return jsonify({
-        "token": token,
-        "user": {
-            "user_id": created["user_id"],
-            "email": created["email"],
-            "first_name": created.get("first_name"),
-            "last_name": created.get("last_name"),
-            "phone": created.get("phone"),
-            "membership_type": created.get("membership_type"),
-            "is_active": created.get("is_active"),
-            "created_at": created["created_at"].isoformat() if created.get("created_at") else None
-        }
-    }), 201
+    response = jsonify({"message": "User created successfully"})
+    return set_jwt_cookie(response, created["user_id"], created["email"])
 
 @app.route("/api/auth/login", methods=["POST"])
 def auth_login():
     data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip()
+    password = data.get("password") or ""
+
+    if not email or not password:
+        return jsonify({"error": "Email and password are required"}), 400
+
+    user = get_user_by_email(email)
+    if not user:
+        return jsonify({"error": "Invalid email or password"}), 401
+
+    if not check_password_hash(user["password_hash"], password):
+        return jsonify({"error": "Invalid email or password"}), 401
+
+    response = jsonify({"message": "Login successful"})
+    return set_jwt_cookie(response, user["user_id"], user["email"])
     email = (data.get("email") or "").strip()
     password = data.get("password") or ""
     if not email or not password:
@@ -180,6 +200,12 @@ def auth_login():
             "created_at": user.get("created_at").isoformat() if user.get("created_at") else None
         }
     }), 200
+
+@app.route("/api/auth/logout", methods=["POST"])
+@auth_required
+def auth_logout():
+    response = jsonify({"message": "Logged out successfully"})
+    return clear_jwt_cookie(response)
 
 @app.route("/api/auth/me", methods=["GET"])
 @auth_required
