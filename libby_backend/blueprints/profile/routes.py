@@ -19,18 +19,22 @@ def save_interests():
         # Create table if it doesn't exist (for dev)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_interests (
-                clerk_id TEXT PRIMARY KEY,
-                interests TEXT
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                genre TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
  
-        # Save or update interests
-        cursor.execute("""
-            INSERT INTO user_interests (clerk_id, interests)
-            VALUES (%s, %s)
-            ON CONFLICT (clerk_id)
-            DO UPDATE SET interests = EXCLUDED.interests;
-        """, (user_id, ",".join(interests)))
+        # Remove existing interests for this user
+        cursor.execute("DELETE FROM user_interests WHERE user_id = %s;", (user_id,))
+  
+        # Insert each selected genre
+        for genre in interests:
+            cursor.execute("""
+                INSERT INTO user_interests (user_id, genre)
+                VALUES (%s, %s);
+            """, (user_id, genre))
  
         conn.commit()
         cursor.close()
