@@ -3,7 +3,7 @@ from libby_backend.database import get_db_connection
  
 profile_bp = Blueprint("profile", __name__)
  
-@profile_bp.route("/api/profile/interests", methods=["POST"])
+@profile_bp.route("/interests", methods=["POST"])
 def save_interests():
     try:
         data = request.get_json()

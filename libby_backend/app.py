@@ -28,35 +28,23 @@ cache = init_cache(app)
 # OPTIONAL BLUEPRINT REGISTRATION
 # (These will be used if you've split your routes into modules.)
 # =============================================================================
-try:
-    from blueprints.auth.routes import auth_bp
-    app.register_blueprint(auth_bp, url_prefix="/api/auth")
-except Exception:
-    pass
 
-try:
-    from blueprints.books.routes import books_bp
-    app.register_blueprint(books_bp, url_prefix="/api/books")
-except Exception:
-    pass
+from blueprints.auth.routes import auth_bp
+app.register_blueprint(auth_bp, url_prefix="/api/auth")
 
+from blueprints.books.routes import books_bp
+app.register_blueprint(books_bp, url_prefix="/api/books")
 # try:
 #     from blueprints.recommendations.routes import rec_bp
 #     app.register_blueprint(rec_bp, url_prefix="/api/recommendations")
 # except Exception:
 #     pass
 
-try:
-    from blueprints.health.routes import health_bp
-    app.register_blueprint(health_bp, url_prefix="/api/health")
-except Exception:
-    pass
+from blueprints.health.routes import health_bp
+app.register_blueprint(health_bp, url_prefix="/api/health")
 
-try:
-    from blueprints.profile.routes import profile_bp
-    app.register_blueprint(profile_bp, url_prefix="/api/profile")
-except Exception:
-    print("Profile blueprint not registered.")
+from blueprints.profile.routes import profile_bp
+app.register_blueprint(profile_bp, url_prefix="/api/profile")
 
 # =============================================================================
 # HEALTH CHECK (fallback if no health blueprint is present)
