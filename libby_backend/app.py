@@ -4,6 +4,7 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
 from libby_backend.cache import init_cache
+from libby_backend.blueprints.profile.routes import profile_bp
 
 # =============================================================================
 # APPLICATION SETUP
@@ -50,6 +51,12 @@ try:
     app.register_blueprint(health_bp, url_prefix="/api/health")
 except Exception:
     pass
+
+try:
+    from blueprints.profile.routes import profile_bp
+    app.register_blueprint(profile_bp, url_prefix="/api/profile")
+except Exception:
+    print("Profile blueprint not registered.")
 
 # =============================================================================
 # HEALTH CHECK (fallback if no health blueprint is present)
