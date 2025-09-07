@@ -345,3 +345,22 @@ def get_book_by_id_db(book_id):
         return None
     finally:
         conn.close()
+
+# RECORD USER INTERACTION
+def record_user_interaction(user_id: int, book_id: int, interaction_type: str = "view"):
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO user_interactions (user_id, book_id, interaction_type)
+                VALUES (%s, %s, %s)
+                RETURNING id, user_id, book_id, interaction_type, timestamp
+            """, (user_id, book_id, interaction_type))
+            return cur.fetchone()
+    except Exception as e:
+        print("record_user_interaction error:", e)
+        return None
+    finally:
+        conn.close()
