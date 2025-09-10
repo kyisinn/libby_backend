@@ -1,7 +1,7 @@
 # =============================================================================
 # FLASK BOOK RECOMMENDATION API - ENTRYPOINT (WITH RECOMMENDATION SYSTEM)
 # =============================================================================
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from libby_backend.cache import init_cache
 import logging
@@ -34,7 +34,7 @@ cache = init_cache(app)
 
 # Auth routes
 try:
-    from blueprints.auth.routes import auth_bp
+    from libby_backend.blueprints.auth.routes import auth_bp
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     logger.info("Auth blueprint registered")
 except ImportError as e:
@@ -42,7 +42,7 @@ except ImportError as e:
 
 # Books routes
 try:
-    from blueprints.books.routes import books_bp
+    from libby_backend.blueprints.books.routes import books_bp
     app.register_blueprint(books_bp, url_prefix="/api/books")
     logger.info("Books blueprint registered")
 except ImportError as e:
@@ -50,7 +50,7 @@ except ImportError as e:
 
 # Recommendation routes (NEW)
 try:
-    from blueprints.recommendations.routes import rec_bp
+    from libby_backend.blueprints.recommendations.routes import rec_bp
     app.register_blueprint(rec_bp, url_prefix="/api/recommendations")
     logger.info("Recommendations blueprint registered")
 except ImportError as e:
@@ -58,7 +58,7 @@ except ImportError as e:
 
 # Health routes
 try:
-    from blueprints.health.routes import health_bp
+    from libby_backend.blueprints.health.routes import health_bp
     app.register_blueprint(health_bp, url_prefix="/api/health")
     logger.info("Health blueprint registered")
 except ImportError as e:
@@ -66,7 +66,7 @@ except ImportError as e:
 
 # Profile routes
 try:
-    from blueprints.profile.routes import profile_bp
+    from libby_backend.blueprints.profile.routes import profile_bp
     app.register_blueprint(profile_bp, url_prefix="/api/profile")
     logger.info("Profile blueprint registered")
 except ImportError as e:
@@ -200,7 +200,7 @@ def not_found(error):
         "available_endpoints": [
             "/api/health",
             "/api/books/search",
-            "/api/books/recommendations/globally-trending",
+            "/api/recommendations/globally-trending",
             "/api/recommendations/<user_id>",
             "/api/recommendations/interactions"
         ]
@@ -268,66 +268,6 @@ def after_request(response):
         response.headers.add('Access-Control-Allow-Credentials', 'true')
     
     return response
-
-# =============================================================================
-# RECOMMENDATION INTEGRATION ENDPOINTS (Direct integration)
-# =============================================================================
-
-# If recommendation blueprint fails to load, provide fallback endpoints
-try:
-    from blueprints.recommendations.routes import rec_bp
-except ImportError:
-    logger.warning("Recommendation blueprint not found, creating fallback endpoints")
-    
-    @app.route('/api/recommendations/<user_id>', methods=['GET'])
-    def fallback_get_recommendations(user_id):
-        """Fallback recommendation endpoint"""
-        try:
-            from libby_backend.recommendation_system import BookRecommendationEngine, RecommendationAPI
-            
-            engine = BookRecommendationEngine()
-            api = RecommendationAPI(engine)
-            
-            limit = int(request.args.get('limit', 20))
-            result = api.get_user_recommendations(user_id=user_id, limit=limit)
-            
-            return jsonify(result)
-            
-        except Exception as e:
-            logger.error(f"Fallback recommendation error: {e}")
-            return jsonify({
-                'success': False,
-                'error': 'Recommendation service unavailable',
-                'books': []
-            }), 500
-    
-    @app.route('/api/recommendations/interactions', methods=['POST'])
-    def fallback_record_interaction():
-        """Fallback interaction recording endpoint"""
-        try:
-            from libby_backend.recommendation_system import BookRecommendationEngine, RecommendationAPI
-            
-            data = request.get_json()
-            if not data:
-                return jsonify({'success': False, 'error': 'No data provided'}), 400
-            
-            engine = BookRecommendationEngine()
-            api = RecommendationAPI(engine)
-            
-            result = api.record_interaction(
-                user_id=data.get('user_id'),
-                book_id=data.get('book_id'),
-                interaction_type=data.get('type')
-            )
-            
-            return jsonify(result)
-            
-        except Exception as e:
-            logger.error(f"Fallback interaction error: {e}")
-            return jsonify({
-                'success': False,
-                'error': 'Interaction service unavailable'
-            }), 500
 
 # =============================================================================
 # APPLICATION RUNNER
