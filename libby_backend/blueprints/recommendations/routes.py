@@ -161,54 +161,9 @@ def get_similar_books(book_id: int):
     try:
         user_id = request.args.get('user_id')  # Optional: for personalized similarity
         limit = int(request.args.get('limit', 10))
-        
-        # Get the target book
-        from libby_backend.database import get_book_by_id_db, get_books_by_genre_db
-        target_book = get_book_by_id_db(book_id)
-        
-        if not target_book:
-            return jsonify({
-                'success': False,
-                'error': 'Book not found'
-            }), 404
-        
-        # Find similar books based on genre
-        similar_books = []
-        if target_book.get('genre'):
-            similar_books = get_books_by_genre_db(
-                target_genre=target_book['genre'],
-                exclude_book_id=book_id,
-                limit=limit
-            )
-        
-        # If user_id is provided, consider their preferences
-        if user_id and similar_books:
-            profile = recommendation_engine.get_user_profile(user_id)
-            
-            # Score books based on user preferences
-            scored_books = []
-            for book_data in similar_books:
-                book = recommendation_engine._get_book_from_main_db(book_data['id'])
-                if book:
-                    score = recommendation_engine._calculate_content_score(book, profile)
-                    book_data['relevance_score'] = score
-                    scored_books.append(book_data)
-            
-            # Sort by relevance score
-            similar_books = sorted(scored_books, key=lambda x: x.get('relevance_score', 0), reverse=True)
-        
-        return jsonify({
-            'success': True,
-            'target_book': {
-                'id': target_book['book_id'],
-                'title': target_book['title'],
-                'author': target_book['author'],
-                'genre': target_book.get('genre')
-            },
-            'similar_books': similar_books,
-            'total_count': len(similar_books)
-        })
-        
+
+        result = recommendation_api.get_similar_books(book_id, user_id=user_id, limit=limit)
+        return jsonify(result)
     except Exception as e:
         logger.error(f"Error getting similar books for {book_id}: {e}")
         return jsonify({
@@ -224,50 +179,19 @@ def get_recommendations_by_genre():
         genres = request.args.getlist('genres')  # Multiple genres supported
         user_id = request.args.get('user_id')  # Optional for personalization
         limit = int(request.args.get('limit', 20))
-        
+
         if not genres:
             return jsonify({
                 'success': False,
                 'error': 'At least one genre must be specified'
             }), 400
-        
-        all_books = []
-        books_per_genre = max(1, limit // len(genres))
-        
-        for genre in genres:
-            genre_books = recommendation_engine._fetch_books_by_genre(
-                genre=genre,
-                limit=books_per_genre * 2  # Get extra for filtering
-            )
-            
-            # If user provided, personalize the selection
-            if user_id and genre_books:
-                profile = recommendation_engine.get_user_profile(user_id)
-                exclude_ids = profile.reading_history + profile.wishlist
-                
-                # Filter out books user has already interacted with
-                filtered_books = [book for book in genre_books if book.id not in exclude_ids]
-                genre_books = filtered_books[:books_per_genre]
-            else:
-                genre_books = genre_books[:books_per_genre]
-            
-            all_books.extend(genre_books)
-        
-        # Remove duplicates
-        seen_ids = set()
-        unique_books = []
-        for book in all_books:
-            if book.id not in seen_ids:
-                seen_ids.add(book.id)
-                unique_books.append(book.__dict__)
-        
-        return jsonify({
-            'success': True,
-            'books': unique_books[:limit],
-            'genres': genres,
-            'total_count': len(unique_books)
-        })
-        
+
+        result = recommendation_api.get_recommendations_by_genre(
+            genres=genres,
+            user_id=user_id,
+            limit=limit
+        )
+        return jsonify(result)
     except Exception as e:
         logger.error(f"Error getting recommendations by genre: {e}")
         return jsonify({
@@ -282,13 +206,13 @@ def get_search_based_recommendations():
         query = request.args.get('q', '').strip()
         user_id = request.args.get('user_id')  # Optional for interaction recording
         limit = int(request.args.get('limit', 20))
-        
+
         if not query:
             return jsonify({
                 'success': False,
                 'error': 'Search query is required'
             }), 400
-        
+
         # Record search interaction if user provided
         if user_id:
             recommendation_api.record_interaction(
@@ -296,20 +220,9 @@ def get_search_based_recommendations():
                 book_id=0,  # Use 0 for search interactions
                 interaction_type='search'
             )
-        
-        # Get search results
-        search_books = recommendation_engine._search_books_by_query(query, limit)
-        
-        # Convert to dict format
-        books_data = [book.__dict__ for book in search_books]
-        
-        return jsonify({
-            'success': True,
-            'books': books_data,
-            'query': query,
-            'total_count': len(books_data)
-        })
-        
+
+        result = recommendation_api.get_search_based_recommendations(query, user_id=user_id, limit=limit)
+        return jsonify(result)
     except Exception as e:
         logger.error(f"Error getting search-based recommendations: {e}")
         return jsonify({
@@ -408,21 +321,6 @@ def admin_batch_update():
         }), 500
 
 
-# USER INTERACTIONS
-@rec_bp.route("/interactions/view", methods=["POST"])
-def record_view():
-    data = request.json
-    user_id = data.get("user_id")
-    book_id = data.get("book_id")
-
-    if not user_id or not book_id:
-        return jsonify({"error": "Missing user_id or book_id"}), 400
-
-    result = record_user_interaction(user_id, book_id, "view")
-    if result:
-        return jsonify({"status": "success", "data": result}), 201
-    else:
-        return jsonify({"status": "error", "message": "Failed to record view"}), 500
 
 
 @rec_bp.route("/test", methods=["GET"])

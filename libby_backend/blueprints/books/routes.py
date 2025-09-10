@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request
 from libby_backend.database import (
-    search_books_db, get_trending_books_db, get_books_by_major_db, get_book_by_id_db
+    search_books_db, get_book_by_id_db
 )
 from ...extensions import cache
 
@@ -17,46 +17,6 @@ def search_books():
     if results is None:
         return jsonify({"error": "Database connection failed."}), 500
     return jsonify(results)
-
-@bp.get("/recommendations/globally-trending")
-@cache.cached(timeout=600, query_string=True)
-def globally_trending():
-    period = request.args.get("period", "5years", type=str)
-    page   = request.args.get("page", 1, type=int)
-    per_page = 20
-    result = get_trending_books_db(period, page, per_page)
-    if result is None:
-        return jsonify({"error": "Database connection failed."}), 500
-    return jsonify({
-        "books": result["books"],
-        "total_books": result["total_books"],
-        "page": page,
-        "per_page": per_page,
-    })
-
-@bp.get("/recommendations/by-major")
-@cache.cached(timeout=600, query_string=True)
-def by_major():
-    major = request.args.get("major", "Computer Science", type=str)
-    page  = request.args.get("page", 1, type=int)
-    per_page = 15
-    result = get_books_by_major_db(major, page, per_page)
-    if result is None:
-        return jsonify({"error": "Database connection failed."}), 500
-    return jsonify({
-        "books": result["books"],
-        "total_books": result["total_books"],
-        "page": page,
-        "per_page": per_page,
-    })
-
-@bp.get("/recommendations/similar-to/<int:book_id>")
-def similar_to(book_id: int):
-    # placeholder (kept minimal as in your code)
-    target = get_book_by_id_db(book_id)
-    if not target:
-        return jsonify({"error": "Book not found."}), 404
-    return jsonify([])
 
 @bp.get("/books/<int:book_id>")
 @cache.cached(timeout=1800)
