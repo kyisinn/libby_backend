@@ -1269,3 +1269,22 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error during testing: {e}")
         print("Please ensure your database connection is properly configured.")
+    def get_globally_trending(self, limit: int = 20) -> Dict:
+        """
+        API endpoint for globally trending books (not user-personalized).
+        Returns: dict with 'success', 'books', and 'total_count'.
+        """
+        try:
+            books = self.engine._fetch_trending_books(limit)
+            return {
+                "success": True,
+                "books": [book.__dict__ for book in books],
+                "total_count": len(books)
+            }
+        except Exception as e:
+            logger.error(f"Error in API get_globally_trending: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "books": []
+            }
