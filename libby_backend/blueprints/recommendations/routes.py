@@ -1,17 +1,3 @@
-@rec_bp.route("/globally-trending", methods=["GET"])
-def get_globally_trending():
-    """Get globally trending books"""
-    try:
-        limit = int(request.args.get('limit', 20))
-        result = recommendation_api.get_globally_trending(limit=limit)
-        return jsonify(result)
-    except Exception as e:
-        logger.error(f"Error getting globally trending books: {e}")
-        return jsonify({
-            'success': False,
-            'error': 'Failed to get globally trending books',
-            'books': []
-        }), 500
 # blueprints/recommendations/routes.py
 from flask import Blueprint, jsonify, request
 from libby_backend.recommendation_system import BookRecommendationEngine, RecommendationAPI
@@ -26,6 +12,21 @@ recommendation_api = RecommendationAPI(recommendation_engine)
 rec_bp = Blueprint("recommendations", __name__, url_prefix="/api/recommendations")
 
 logger = logging.getLogger(__name__)
+
+@rec_bp.route("/globally-trending", methods=["GET"])
+def get_globally_trending():
+    """Get globally trending books"""
+    try:
+        limit = int(request.args.get('limit', 20))
+        result = recommendation_api.get_globally_trending(limit=limit)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error getting globally trending books: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to get globally trending books',
+            'books': []
+        }), 500
 
 @rec_bp.route("/<user_id>", methods=["GET"])
 @cache.cached(timeout=300, query_string=True)  # Cache for 5 minutes
