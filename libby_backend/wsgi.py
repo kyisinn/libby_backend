@@ -1,7 +1,5 @@
 # libby_backend/wsgi.py
-from libby_backend import create_app
-
-app = create_app()
+from libby_backend.app import app
 
 if __name__ == "__main__":
     app.run()
