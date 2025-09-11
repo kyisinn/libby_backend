@@ -59,3 +59,29 @@ def save_interests():
 
     print("✅ Interests saved successfully")
     return jsonify({"message": "Interests saved"}), 200
+
+# ───────────────────────────────────────────────────────────────
+# GET /api/profile/interests → fetch user interests
+# ───────────────────────────────────────────────────────────────
+@profile_bp.get("/interests")
+def get_interests():
+    user_id = request.args.get("user_id")
+    print("🔍 Fetching interests for user_id:", user_id)
+
+    if not user_id:
+        return jsonify({"error": "Missing user_id"}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT genre FROM user_interests
+        WHERE user_id = %s
+        ORDER BY created_at ASC;
+    """, (user_id,))
+    genres = [row[0] for row in cursor.fetchall()]
+
+    cursor.close()
+    conn.close()
+
+    return jsonify({"genres": genres})
