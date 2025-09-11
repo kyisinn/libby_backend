@@ -1,17 +1,28 @@
 from flask import Blueprint, request, jsonify
 from libby_backend.database import get_db_connection
 
-# Create the blueprint
-profile_bp = Blueprint("profile", __name__)
-print("✅ profile.routes.py is loading...")  # Debug to confirm module import
+# Register blueprint with URL prefix
+profile_bp = Blueprint("profile", __name__, url_prefix="/api/profile")
+print("✅ profile.routes.py is loading...")  # Confirm it's imported
 
-@profile_bp.route("/interests", methods=["POST"])
+# ───────────────────────────────────────────────────────────────
+# GET /api/profile/ping → simple health check
+# ───────────────────────────────────────────────────────────────
+@profile_bp.get("/ping")
+def ping():
+    return jsonify({"message": "pong"})
+
+# ───────────────────────────────────────────────────────────────
+# POST /api/profile/interests → save user interests
+# ───────────────────────────────────────────────────────────────
+@profile_bp.post("/interests")
 def save_interests():
     data = request.get_json()
     print("📩 Received data from frontend:", data)
 
     user_id = data.get("clerk_user_id")
     interests = data.get("interests", [])
+
     print("🧑 user_id:", user_id)
     print("📚 interests:", interests)
 
@@ -23,7 +34,7 @@ def save_interests():
     cursor = conn.cursor()
     print("✅ Connected to DB, clearing old interests...")
 
-    # Create table if it doesn't exist (dev only)
+    # Create table (dev only)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_interests (
             id SERIAL PRIMARY KEY,
@@ -33,10 +44,8 @@ def save_interests():
         );
     """)
 
-    # Delete previous interests for the user
     cursor.execute("DELETE FROM user_interests WHERE user_id = %s;", (user_id,))
 
-    # Insert new interests
     for genre in interests:
         print("   ➤ Inserting genre:", genre)
         cursor.execute("""
@@ -47,9 +56,6 @@ def save_interests():
     conn.commit()
     cursor.close()
     conn.close()
+
     print("✅ Interests saved successfully")
     return jsonify({"message": "Interests saved"}), 200
-
-@profile_bp.route("/ping", methods=["GET"])
-def ping():
-    return jsonify({"message": "pong"}), 200
