@@ -183,10 +183,20 @@ def get_trending_books_db(period, page, per_page):
                         b.title,
                         b.cover_image_url AS coverurl,
                         b.rating,
-                        b.publication_date,
+                        CASE 
+                            WHEN EXTRACT(YEAR FROM b.publication_date) > 2025
+                            THEN b.publication_date - INTERVAL '543 years'
+                            ELSE b.publication_date
+                        END AS corrected_date,
                         COALESCE(b.author, 'Unknown Author') AS author,
                         CASE 
-                            WHEN b.publication_date >= CURRENT_DATE - INTERVAL %s THEN 1 
+                            WHEN (
+                                CASE 
+                                    WHEN EXTRACT(YEAR FROM b.publication_date) > 2025
+                                    THEN b.publication_date - INTERVAL '543 years'
+                                    ELSE b.publication_date
+                                END
+                            ) >= CURRENT_DATE - INTERVAL %s THEN 1 
                             ELSE 2 
                         END as date_priority
                     FROM books b
@@ -197,7 +207,7 @@ def get_trending_books_db(period, page, per_page):
                 )
                 SELECT id, title, coverurl, rating, author
                 FROM trending_books
-                ORDER BY date_priority ASC, rating DESC, publication_date DESC NULLS LAST
+                ORDER BY date_priority ASC, rating DESC, corrected_date DESC NULLS LAST
                 LIMIT %s OFFSET %s
             """, (interval_period, per_page, offset))
             books = cursor.fetchall()
