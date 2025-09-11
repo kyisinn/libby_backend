@@ -29,10 +29,10 @@ cache = init_cache(app)
 # (These will be used if you've split your routes into modules.)
 # =============================================================================
 
-from blueprints.auth.routes import auth_bp
+from libby_backend.blueprints.auth.routes import auth_bp
 app.register_blueprint(auth_bp, url_prefix="/api/auth")
 
-from blueprints.books.routes import books_bp
+from libby_backend.blueprints.books.routes import books_bp
 app.register_blueprint(books_bp, url_prefix="/api/books")
 # try:
 #     from blueprints.recommendations.routes import rec_bp
@@ -40,10 +40,10 @@ app.register_blueprint(books_bp, url_prefix="/api/books")
 # except Exception:
 #     pass
 
-from blueprints.health.routes import health_bp
+from libby_backend.blueprints.health.routes import health_bp
 app.register_blueprint(health_bp, url_prefix="/api/health")
 
-from blueprints.profile.routes import profile_bp
+from libby_backend.blueprints.profile.routes import profile_bp
 app.register_blueprint(profile_bp, url_prefix="/api/profile")
 
 # =============================================================================
