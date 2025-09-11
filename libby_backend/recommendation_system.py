@@ -909,25 +909,25 @@ class BookRecommendationEngine:
 # Flask API Integration Classes
 class RecommendationAPI:
     """Flask API endpoints for the recommendation system"""
-
+    
     def __init__(self, recommendation_engine: BookRecommendationEngine):
         self.engine = recommendation_engine
-
-    def get_user_recommendations(self, user_id: str, email: str = None,
-                                 genres: List[str] = None, limit: int = 20) -> Dict:
+    
+    def get_user_recommendations(self, user_id: str, email: str = None, 
+                               genres: List[str] = None, limit: int = 20) -> Dict:
         """API endpoint for getting user recommendations"""
         try:
             # Get user's selected genres from database if not provided
             if not genres:
                 genres = self.engine.get_user_interests_from_db(user_id)
-
+            
             result = self.engine.get_recommendations_for_user(
                 user_id=user_id,
-                email=email,
+                email=email, 
                 selected_genres=genres,
                 limit=limit
             )
-
+            
             return {
                 'success': True,
                 'books': [book.__dict__ for book in result.books],
@@ -937,7 +937,7 @@ class RecommendationAPI:
                 'generated_at': result.generated_at.isoformat(),
                 'total_count': len(result.books)
             }
-
+            
         except Exception as e:
             logger.error(f"Error in API get_user_recommendations: {e}")
             return {
@@ -945,12 +945,12 @@ class RecommendationAPI:
                 'error': str(e),
                 'books': []
             }
-
+    
     def get_personalized_trending(self, user_id: str, limit: int = 10) -> Dict:
         """API endpoint for personalized trending books"""
         try:
             result = self.engine.get_personalized_trending(user_id, limit)
-
+            
             return {
                 'success': True,
                 'books': [book.__dict__ for book in result.books],
@@ -959,7 +959,7 @@ class RecommendationAPI:
                 'reasons': result.reasons,
                 'generated_at': result.generated_at.isoformat()
             }
-
+            
         except Exception as e:
             logger.error(f"Error in API get_personalized_trending: {e}")
             return {
@@ -967,7 +967,7 @@ class RecommendationAPI:
                 'error': str(e),
                 'books': []
             }
-
+    
     def record_interaction(self, user_id: str, book_id: int, interaction_type: str) -> Dict:
         """API endpoint for recording user interactions"""
         try:
@@ -981,40 +981,40 @@ class RecommendationAPI:
                 'like': 1.5,
                 'dislike': -0.5
             }
-
+            
             weight = weight_map.get(interaction_type, 1.0)
-
+            
             self.engine.record_user_interaction(user_id, book_id, interaction_type, weight)
-
+            
             return {
                 'success': True,
                 'message': f'Recorded {interaction_type} for book {book_id}'
             }
-
+            
         except Exception as e:
             logger.error(f"Error recording interaction: {e}")
             return {
                 'success': False,
                 'error': str(e)
             }
-
+    
     def get_user_stats(self, user_id: str) -> Dict:
         """API endpoint for user recommendation statistics"""
         try:
             stats = self.engine.get_recommendation_stats(user_id)
-
+            
             return {
                 'success': True,
                 'stats': stats
             }
-
+            
         except Exception as e:
             logger.error(f"Error getting user stats: {e}")
             return {
                 'success': False,
                 'error': str(e)
             }
-
+    
     def refresh_recommendations(self, user_id: str, limit: int = 20) -> Dict:
         """API endpoint for forcing recommendation refresh"""
         try:
@@ -1023,7 +1023,7 @@ class RecommendationAPI:
                 limit=limit,
                 force_refresh=True
             )
-
+            
             return {
                 'success': True,
                 'books': [book.__dict__ for book in result.books],
@@ -1032,123 +1032,13 @@ class RecommendationAPI:
                 'reasons': result.reasons,
                 'generated_at': result.generated_at.isoformat()
             }
-
+            
         except Exception as e:
             logger.error(f"Error refreshing recommendations: {e}")
             return {
                 'success': False,
                 'error': str(e)
             }
-
-    def get_similar_books(self, book_id: int, user_id: str = None, limit: int = 10) -> Dict:
-        """
-        Get books similar to a given book, optionally personalized to a user.
-        Uses the engine's _get_book_from_main_db and _calculate_content_score.
-        """
-        try:
-            # Get the reference book
-            book = self.engine._get_book_from_main_db(book_id)
-            if not book:
-                return {'success': False, 'error': 'Book not found', 'books': []}
-
-            # Get user profile if user_id provided, else use empty profile
-            if user_id:
-                profile = self.engine.get_user_profile(user_id)
-            else:
-                # Empty profile
-                profile = UserProfile(user_id="anon", email="", selected_genres=[])
-
-            # Use the genre of the book to fetch similar books
-            genre = book.genre or ""
-            similar_books = self.engine._fetch_books_by_genre(genre, limit*2, exclude_ids=[book.id])
-            # Optionally, score by content similarity
-            scored_books = []
-            for b in similar_books:
-                score = self.engine._calculate_content_score(b, profile)
-                b.content_score = score
-                scored_books.append(b)
-            # Sort and take top
-            scored_books.sort(key=lambda x: getattr(x, 'content_score', 0), reverse=True)
-            top_books = scored_books[:limit]
-            return {
-                'success': True,
-                'books': [b.__dict__ for b in top_books]
-            }
-        except Exception as e:
-            logger.error(f"Error in get_similar_books: {e}")
-            return {'success': False, 'error': str(e), 'books': []}
-
-    def get_recommendations_by_genre(self, genres: List[str], user_id: str = None, limit: int = 20) -> Dict:
-        """
-        Get recommendations for a list of genres, optionally personalized to a user.
-        Uses the engine's _fetch_books_by_genre and _calculate_content_score.
-        """
-        try:
-            exclude_ids = []
-            if user_id:
-                profile = self.engine.get_user_profile(user_id)
-                exclude_ids = profile.reading_history + profile.wishlist
-            else:
-                # Empty profile
-                profile = UserProfile(user_id="anon", email="", selected_genres=[])
-
-            # Fetch and score books for each genre
-            books = []
-            genres = genres or []
-            per_genre = max(1, limit // max(1, len(genres)))
-            for genre in genres:
-                genre_books = self.engine._fetch_books_by_genre(genre, per_genre*2, exclude_ids)
-                for b in genre_books:
-                    score = self.engine._calculate_content_score(b, profile)
-                    b.content_score = score
-                # Sort and take top per genre
-                genre_books.sort(key=lambda x: getattr(x, 'content_score', 0), reverse=True)
-                books.extend(genre_books[:per_genre])
-                if len(books) >= limit:
-                    break
-            # Remove duplicates
-            seen = set()
-            unique_books = []
-            for b in books:
-                if b.id not in seen:
-                    seen.add(b.id)
-                    unique_books.append(b)
-                if len(unique_books) >= limit:
-                    break
-            return {
-                'success': True,
-                'books': [b.__dict__ for b in unique_books]
-            }
-        except Exception as e:
-            logger.error(f"Error in get_recommendations_by_genre: {e}")
-            return {'success': False, 'error': str(e), 'books': []}
-
-    def get_search_based_recommendations(self, query: str, user_id: str = None, limit: int = 20) -> Dict:
-        """
-        Get recommendations based on a search query, optionally personalized to a user.
-        Uses the engine's _search_books_by_query and _calculate_content_score.
-        """
-        try:
-            exclude_ids = []
-            if user_id:
-                profile = self.engine.get_user_profile(user_id)
-                exclude_ids = profile.reading_history + profile.wishlist
-            else:
-                profile = UserProfile(user_id="anon", email="", selected_genres=[])
-
-            books = self.engine._search_books_by_query(query, limit*2, exclude_ids)
-            for b in books:
-                score = self.engine._calculate_content_score(b, profile)
-                b.content_score = score
-            books.sort(key=lambda x: getattr(x, 'content_score', 0), reverse=True)
-            top_books = books[:limit]
-            return {
-                'success': True,
-                'books': [b.__dict__ for b in top_books]
-            }
-        except Exception as e:
-            logger.error(f"Error in get_search_based_recommendations: {e}")
-            return {'success': False, 'error': str(e), 'books': []}
 
 # Test function to verify database integration
 def test_recommendation_system_with_db():
@@ -1269,22 +1159,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error during testing: {e}")
         print("Please ensure your database connection is properly configured.")
-    def get_globally_trending(self, limit: int = 20) -> Dict:
-        """
-        API endpoint for globally trending books (not user-personalized).
-        Returns: dict with 'success', 'books', and 'total_count'.
-        """
-        try:
-            books = self.engine._fetch_trending_books(limit)
-            return {
-                "success": True,
-                "books": [book.__dict__ for book in books],
-                "total_count": len(books)
-            }
-        except Exception as e:
-            logger.error(f"Error in API get_globally_trending: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "books": []
-            }
