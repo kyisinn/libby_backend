@@ -1,13 +1,13 @@
 from flask import Blueprint, jsonify, current_app
 from libby_backend.extensions import cache
 
-bp = Blueprint("health", __name__, url_prefix="/api")
+health_bp = Blueprint("health", __name__, url_prefix="/api")
 
-@bp.get("/health")
+@health_bp.get("/health")
 def health():
     return jsonify({"status":"healthy","service":"book-recommendation-api","version":"1.0.0"})
 
-@bp.get("/health/detailed")
+@health_bp.get("/health/detailed")
 def detailed():
     try:
         from ...database import get_db_connection
@@ -32,7 +32,7 @@ def detailed():
     except Exception as e:
         return jsonify({"status":"unhealthy","error":str(e)}), 500
 
-@bp.get("/_debug/headers")
+@health_bp.get("/_debug/headers")
 def debug_headers():
     from flask import request
     return jsonify({k: v for k, v in request.headers.items()})

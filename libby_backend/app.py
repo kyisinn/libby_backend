@@ -4,7 +4,7 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
 from libby_backend.cache import init_cache
-from libby_backend.blueprints.profile.routes import profile_bp
+
 
 # =============================================================================
 # APPLICATION SETUP
