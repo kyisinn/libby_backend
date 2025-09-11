@@ -29,8 +29,6 @@ cache = init_cache(app)
 # (These will be used if you've split your routes into modules.)
 # =============================================================================
 
-from libby_backend.blueprints.auth.routes import auth_bp
-app.register_blueprint(auth_bp, url_prefix="/api/auth")
 
 from libby_backend.blueprints.books.routes import books_bp
 app.register_blueprint(books_bp, url_prefix="/api/books")
