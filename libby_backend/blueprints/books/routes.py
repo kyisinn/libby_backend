@@ -6,7 +6,7 @@ from ...extensions import cache
 
 books_bp = Blueprint("books", __name__, url_prefix="/api/books")
 
-@bp.get("/search")
+@books_bp.get("/search")
 @cache.cached(timeout=180, query_string=True)
 
 def search_books():
@@ -17,7 +17,7 @@ def search_books():
     if results is None:
         return jsonify({"error": "Database connection failed."}), 500
     return jsonify(results)
-@bp.get("/recommendations/globally-trending")
+@books_bp.get("/recommendations/globally-trending")
 @cache.cached(timeout=600, query_string=True)
 def globally_trending():
     period = request.args.get("period", "5years", type=str)
@@ -33,7 +33,7 @@ def globally_trending():
         "per_page": per_page,
     })
 
-@bp.get("/recommendations/by-major")
+@books_bp.get("/recommendations/by-major")
 @cache.cached(timeout=600, query_string=True)
 def by_major():
     major = request.args.get("major", "Computer Science", type=str)
@@ -49,7 +49,7 @@ def by_major():
         "per_page": per_page,
     })
 
-@bp.get("/recommendations/similar-to/<int:book_id>")
+@books_bp.get("/recommendations/similar-to/<int:book_id>")
 def similar_to(book_id: int):
     # placeholder (kept minimal as in your code)
     target = get_book_by_id_db(book_id)
@@ -58,7 +58,7 @@ def similar_to(book_id: int):
     return jsonify([])
 
 
-@bp.get("/books/<int:book_id>")
+@books_bp.get("/books/<int:book_id>")
 @cache.cached(timeout=1800)
 def get_book(book_id: int):
     book = get_book_by_id_db(book_id)
