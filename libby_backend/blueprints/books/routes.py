@@ -4,7 +4,7 @@ from libby_backend.database import (
 )
 from ...extensions import cache
 
-bp = Blueprint("books", __name__, url_prefix="/api")
+books_bp = Blueprint("books", __name__, url_prefix="/api/books")
 
 @bp.get("/search")
 @cache.cached(timeout=180, query_string=True)
