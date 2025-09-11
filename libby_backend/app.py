@@ -65,9 +65,9 @@ except ImportError as e:
     logger.warning(f"Could not import health blueprint: {e}")
 
 # Profile routes
-    from libby_backend.blueprints.profile.routes import profile_bp
-    app.register_blueprint(profile_bp, url_prefix="/api/profile")
-    logger.info("Profile blueprint registered")
+from libby_backend.blueprints.profile.routes import profile_bp
+app.register_blueprint(profile_bp, url_prefix="/api/profile")
+logger.info("✅ Profile blueprint registered")
 
 # =============================================================================
 # HEALTH CHECK (fallback if no health blueprint is present)
