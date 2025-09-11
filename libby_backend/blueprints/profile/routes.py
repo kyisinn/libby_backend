@@ -79,7 +79,7 @@ def get_interests():
         WHERE user_id = %s
         ORDER BY created_at ASC;
     """, (user_id,))
-    genres = [row[0] for row in cursor.fetchall()]
+    genres = [row["genre"] for row in cursor.fetchall()]
 
     cursor.close()
     conn.close()
