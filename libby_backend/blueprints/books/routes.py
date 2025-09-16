@@ -17,6 +17,8 @@ def search_books():
     if results is None:
         return jsonify({"error": "Database connection failed."}), 500
     return jsonify(results)
+
+
 @books_bp.get("/recommendations/globally-trending")
 @cache.cached(timeout=600, query_string=True)
 def globally_trending():
