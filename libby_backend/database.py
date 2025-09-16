@@ -48,30 +48,70 @@ def search_books_db(query):
     if not conn:
         return None
     try:
-        query_words = query.strip().split()  # Tokenize query by spaces
+        query_cleaned = query.strip().lower()
+        query_words = query_cleaned.split()
+        
         with conn.cursor() as cursor:
-            # Build dynamic SQL conditions
+            # Build dynamic SQL with relevance scoring
             conditions = []
             params = []
+            relevance_parts = []
+            
             for word in query_words:
                 word_pattern = f"%{word}%"
+                word_exact = word
+                word_start = f"{word}%"
+                
+                # Each word must match in at least one field
                 conditions.append("(b.title ILIKE %s OR b.author ILIKE %s OR b.genre ILIKE %s)")
                 params.extend([word_pattern, word_pattern, word_pattern])
-            where_clause = " AND ".join(conditions)  # all words must match
+                
+                # Add relevance scoring (higher score = better match)
+                relevance_parts.append(f"""
+                    CASE WHEN LOWER(b.title) = %s THEN 100
+                         WHEN LOWER(b.author) = %s THEN 90
+                         WHEN LOWER(b.genre) = %s THEN 80
+                         WHEN LOWER(b.title) LIKE %s THEN 70
+                         WHEN LOWER(b.author) LIKE %s THEN 60
+                         WHEN LOWER(b.genre) LIKE %s THEN 50
+                         WHEN b.title ILIKE %s THEN 40
+                         WHEN b.author ILIKE %s THEN 30
+                         WHEN b.genre ILIKE %s THEN 20
+                         ELSE 0
+                    END
+                """)
+                params.extend([
+                    word_exact, word_exact, word_exact,  # exact matches
+                    word_start, word_start, word_start,  # starts with
+                    word_pattern, word_pattern, word_pattern  # contains
+                ])
+            
+            where_clause = " AND ".join(conditions)
+            relevance_clause = " + ".join(relevance_parts)
+            
             sql = f"""
                 SELECT DISTINCT
                     b.book_id AS id,
                     b.title,
                     b.cover_image_url AS coverurl,
                     COALESCE(b.author, 'Unknown Author') AS author,
-                    b.rating
+                    b.rating,
+                    ({relevance_clause}) AS relevance_score
                 FROM books b
                 WHERE {where_clause}
-                ORDER BY b.rating DESC NULLS LAST
+                ORDER BY relevance_score DESC, b.rating DESC NULLS LAST
                 LIMIT 50
             """
+            
             cursor.execute(sql, params)
-            return cursor.fetchall()
+            results = cursor.fetchall()
+            
+            # Remove relevance_score from final results if you don't want it exposed
+            return [
+                {k: v for k, v in row.items() if k != 'relevance_score'}
+                for row in results
+            ]
+            
     except Exception as e:
         print("Railway search error:", e)
         return None
@@ -128,22 +168,38 @@ def get_trending_books_db(period, page, per_page):
                         b.cover_image_url IS NOT NULL 
                         AND b.cover_image_url <> ''
                         AND b.rating IS NOT NULL
+                        AND (
+                            CASE 
+                                WHEN EXTRACT(YEAR FROM b.publication_date) > 2025
+                                THEN b.publication_date - INTERVAL '543 years'
+                                ELSE b.publication_date
+                            END
+                        ) >= CURRENT_DATE - INTERVAL %s
                 )
                 SELECT id, title, coverurl, rating, author
                 FROM trending_books
                 ORDER BY date_priority ASC, rating DESC, corrected_date DESC NULLS LAST
                 LIMIT %s OFFSET %s
-            """, (interval_period, per_page, offset))
+            """, (interval_period, interval_period, per_page, offset))
             books = cursor.fetchall()
 
+            # Get total count for pagination - only books matching the period filter
             cursor.execute("""
                 SELECT COUNT(DISTINCT b.book_id) AS count
                 FROM books b
                 WHERE b.cover_image_url IS NOT NULL 
                   AND b.cover_image_url <> ''
                   AND b.rating IS NOT NULL
-            """)
+                  AND (
+                      CASE 
+                          WHEN EXTRACT(YEAR FROM b.publication_date) > 2025
+                          THEN b.publication_date - INTERVAL '543 years'
+                          ELSE b.publication_date
+                      END
+                  ) >= CURRENT_DATE - INTERVAL %s
+            """, (interval_period,))
             total_books = cursor.fetchone()['count']
+            
             return {'books': books, 'total_books': total_books}
     except Exception as e:
         print("Railway trending query error:", e)
