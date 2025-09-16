@@ -48,69 +48,67 @@ def search_books_db(query):
     if not conn:
         return None
     try:
-        query_cleaned = query.strip().lower()
-        query_words = query_cleaned.split()
+        query_words = query.strip().split()
         
         with conn.cursor() as cursor:
-            # Build dynamic SQL with relevance scoring
-            conditions = []
+            # Build conditions for exact word matches vs partial matches
+            exact_conditions = []
+            partial_conditions = []
             params = []
-            relevance_parts = []
             
             for word in query_words:
+                # Exact word match using word boundaries
+                word_boundary = f'\\m{word}\\M'  # PostgreSQL word boundaries
                 word_pattern = f"%{word}%"
-                word_exact = word
-                word_start = f"{word}%"
                 
-                # Each word must match in at least one field
-                conditions.append("(b.title ILIKE %s OR b.author ILIKE %s OR b.genre ILIKE %s)")
+                # Exact word conditions (higher priority)
+                exact_conditions.append("(b.title ~* %s OR b.author ~* %s OR b.genre ~* %s)")
+                params.extend([word_boundary, word_boundary, word_boundary])
+                
+                # Partial match conditions (fallback)
+                partial_conditions.append("(b.title ILIKE %s OR b.author ILIKE %s OR b.genre ILIKE %s)")
                 params.extend([word_pattern, word_pattern, word_pattern])
-                
-                # Add relevance scoring (higher score = better match)
-                relevance_parts.append(f"""
-                    CASE WHEN LOWER(b.title) = %s THEN 100
-                         WHEN LOWER(b.author) = %s THEN 90
-                         WHEN LOWER(b.genre) = %s THEN 80
-                         WHEN LOWER(b.title) LIKE %s THEN 70
-                         WHEN LOWER(b.author) LIKE %s THEN 60
-                         WHEN LOWER(b.genre) LIKE %s THEN 50
-                         WHEN b.title ILIKE %s THEN 40
-                         WHEN b.author ILIKE %s THEN 30
-                         WHEN b.genre ILIKE %s THEN 20
-                         ELSE 0
-                    END
-                """)
-                params.extend([
-                    word_exact, word_exact, word_exact,  # exact matches
-                    word_start, word_start, word_start,  # starts with
-                    word_pattern, word_pattern, word_pattern  # contains
-                ])
             
-            where_clause = " AND ".join(conditions)
-            relevance_clause = " + ".join(relevance_parts)
+            # Combine conditions: prefer exact matches, allow partial as fallback
+            exact_clause = " AND ".join(exact_conditions)
+            partial_clause = " AND ".join(partial_conditions)
             
             sql = f"""
-                SELECT DISTINCT
-                    b.book_id AS id,
-                    b.title,
-                    b.cover_image_url AS coverurl,
-                    COALESCE(b.author, 'Unknown Author') AS author,
-                    b.rating,
-                    ({relevance_clause}) AS relevance_score
-                FROM books b
-                WHERE {where_clause}
-                ORDER BY relevance_score DESC, b.rating DESC NULLS LAST
+                WITH exact_matches AS (
+                    SELECT DISTINCT
+                        b.book_id AS id,
+                        b.title,
+                        b.cover_image_url AS coverurl,
+                        COALESCE(b.author, 'Unknown Author') AS author,
+                        b.rating,
+                        1 as match_type
+                    FROM books b
+                    WHERE {exact_clause}
+                ),
+                partial_matches AS (
+                    SELECT DISTINCT
+                        b.book_id AS id,
+                        b.title,
+                        b.cover_image_url AS coverurl,
+                        COALESCE(b.author, 'Unknown Author') AS author,
+                        b.rating,
+                        2 as match_type
+                    FROM books b
+                    WHERE {partial_clause}
+                    AND b.book_id NOT IN (SELECT id FROM exact_matches)
+                )
+                SELECT id, title, coverurl, author, rating
+                FROM (
+                    SELECT * FROM exact_matches
+                    UNION ALL
+                    SELECT * FROM partial_matches
+                ) combined
+                ORDER BY match_type ASC, rating DESC NULLS LAST
                 LIMIT 50
             """
             
             cursor.execute(sql, params)
-            results = cursor.fetchall()
-            
-            # Remove relevance_score from final results if you don't want it exposed
-            return [
-                {k: v for k, v in row.items() if k != 'relevance_score'}
-                for row in results
-            ]
+            return cursor.fetchall()
             
     except Exception as e:
         print("Railway search error:", e)
