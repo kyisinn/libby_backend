@@ -174,7 +174,7 @@ def get_trending_books_db(period, page, per_page):
                             END
                         ) >= CURRENT_DATE - INTERVAL %s
                 )
-                SELECT id, title, coverurl, rating, author
+                SELECT id, title, coverurl, rating, author, corrected_date AS publication_date
                 FROM trending_books
                 ORDER BY date_priority ASC, rating DESC, corrected_date DESC NULLS LAST
                 LIMIT %s OFFSET %s
