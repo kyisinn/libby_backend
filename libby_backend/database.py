@@ -5,10 +5,72 @@
 
 import os
 import psycopg2
+import psycopg2.errors
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
+from sqlalchemy import create_engine
 
 load_dotenv()
+
+# SQLAlchemy engine for recommendation system
+engine = create_engine(
+    os.getenv("DATABASE_URL"),
+    pool_pre_ping=True,
+    pool_recycle=300,
+    echo=False  # Set to True for SQL debugging
+)
+
+# -----------------------------------------------------------------------------
+# Database Table Creation
+# -----------------------------------------------------------------------------
+def create_user_interactions_table():
+    """Create the user_interactions table if it doesn't exist"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            # First check if table exists
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'user_interactions'
+                );
+            """)
+            result = cur.fetchone()
+            table_exists = result['exists'] if result else False
+            
+            if table_exists:
+                print("user_interactions table already exists")
+                return True
+            
+            # Create the table with a simpler approach
+            cur.execute("""
+                CREATE TABLE user_interactions (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    book_id INTEGER NOT NULL,
+                    interaction_type VARCHAR(50) NOT NULL DEFAULT 'view',
+                    rating DECIMAL(3,2) DEFAULT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            
+            # Create indexes separately
+            cur.execute("CREATE INDEX idx_user_interactions_user_id ON user_interactions(user_id);")
+            cur.execute("CREATE INDEX idx_user_interactions_book_id ON user_interactions(book_id);")
+            cur.execute("CREATE INDEX idx_user_interactions_timestamp ON user_interactions(timestamp);")
+            
+            conn.commit()
+            print("user_interactions table created successfully")
+            return True
+    except Exception as e:
+        print(f"Error creating user_interactions table: {e}")
+        print(f"Error type: {type(e)}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
 
 # -----------------------------------------------------------------------------
 # Connection
@@ -356,21 +418,311 @@ def get_book_by_id_db(book_id):
     finally:
         conn.close()
 
-# RECORD USER INTERACTION
-def record_user_interaction(user_id: int, book_id: int, interaction_type: str = "view"):
+# # RECORD USER INTERACTION
+# def record_user_interaction(user_id: int, book_id: int, interaction_type: str = "view"):
+#     conn = get_db_connection()
+#     if not conn:
+#         return None
+#     try:
+#         with conn.cursor() as cur:
+#             cur.execute("""
+#                 INSERT INTO user_interactions (user_id, book_id, interaction_type)
+#                 VALUES (%s, %s, %s)
+#                 RETURNING id, user_id, book_id, interaction_type, timestamp
+#             """, (user_id, book_id, interaction_type))
+#             return cur.fetchone()
+#     except Exception as e:
+#         print("record_user_interaction error:", e)
+#         return None
+#     finally:
+#         conn.close()
+
+def record_user_interaction_db(user_id: int, book_id: int, interaction_type: str = "view", rating: float = None):
+    """Enhanced user interaction recording with more interaction types"""
     conn = get_db_connection()
     if not conn:
         return None
     try:
         with conn.cursor() as cur:
+            # First, try to insert into the table
             cur.execute("""
-                INSERT INTO user_interactions (user_id, book_id, interaction_type)
-                VALUES (%s, %s, %s)
+                INSERT INTO user_interactions (user_id, book_id, interaction_type, rating, timestamp)
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
                 RETURNING id, user_id, book_id, interaction_type, timestamp
-            """, (user_id, book_id, interaction_type))
-            return cur.fetchone()
+            """, (user_id, book_id, interaction_type, rating))
+            result = cur.fetchone()
+            conn.commit()
+            return result
+    except psycopg2.errors.UndefinedTable:
+        # Table doesn't exist, create it
+        print("user_interactions table doesn't exist, creating it...")
+        conn.rollback()
+        conn.close()
+        
+        # Create the table
+        if create_user_interactions_table():
+            # Retry the insert
+            conn = get_db_connection()
+            if conn:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO user_interactions (user_id, book_id, interaction_type, rating, timestamp)
+                            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                            RETURNING id, user_id, book_id, interaction_type, timestamp
+                        """, (user_id, book_id, interaction_type, rating))
+                        result = cur.fetchone()
+                        conn.commit()
+                        return result
+                except Exception as e:
+                    print("record_user_interaction_db retry error:", e)
+                    conn.rollback()
+                    return None
+                finally:
+                    conn.close()
+        return None
     except Exception as e:
-        print("record_user_interaction error:", e)
+        print("record_user_interaction_db error:", e)
+        conn.rollback()
         return None
     finally:
+        if conn and not conn.closed:
+            conn.close()
+
+def get_user_interactions_db(user_id: int, limit: int = 100):
+    """Get user interaction history"""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ui.book_id, ui.interaction_type, ui.rating, ui.timestamp,
+                       b.title, b.author, b.genre, b.cover_image_url
+                FROM user_interactions ui
+                LEFT JOIN books b ON ui.book_id = b.book_id
+                WHERE ui.user_id = %s
+                ORDER BY ui.timestamp DESC
+                LIMIT %s
+            """, (user_id, limit))
+            return cur.fetchall()
+    except psycopg2.errors.UndefinedTable:
+        print("user_interactions table doesn't exist, creating it...")
+        create_user_interactions_table()
+        return []  # Return empty list for now
+    except Exception as e:
+        print("get_user_interactions_db error:", e)
+        return []
+    finally:
         conn.close()
+
+def get_collaborative_recommendations_db(user_id: int, limit: int = 20):
+    """Get collaborative filtering recommendations based on similar users"""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            # Find users with similar interaction patterns
+            cur.execute("""
+                WITH user_books AS (
+                    SELECT book_id 
+                    FROM user_interactions 
+                    WHERE user_id = %s 
+                    AND interaction_type IN ('click', 'view', 'wishlist_add')
+                ),
+                similar_users AS (
+                    SELECT ui2.user_id, COUNT(*) as common_books
+                    FROM user_interactions ui2
+                    WHERE ui2.book_id IN (SELECT book_id FROM user_books)
+                    AND ui2.user_id != %s
+                    AND ui2.interaction_type IN ('click', 'view', 'wishlist_add')
+                    GROUP BY ui2.user_id
+                    HAVING COUNT(*) >= 2
+                    ORDER BY common_books DESC
+                    LIMIT 10
+                ),
+                recommended_books AS (
+                    SELECT b.book_id, b.title, b.author, b.genre, b.cover_image_url, 
+                           b.rating, COUNT(*) as recommendation_score
+                    FROM user_interactions ui
+                    JOIN books b ON ui.book_id = b.book_id
+                    WHERE ui.user_id IN (SELECT user_id FROM similar_users)
+                    AND ui.book_id NOT IN (SELECT book_id FROM user_books)
+                    AND ui.interaction_type IN ('click', 'view', 'wishlist_add')
+                    AND b.rating >= 3.0
+                    GROUP BY b.book_id, b.title, b.author, b.genre, b.cover_image_url, b.rating
+                    ORDER BY recommendation_score DESC, b.rating DESC
+                    LIMIT %s
+                )
+                SELECT book_id AS id, title, author, genre, cover_image_url AS coverurl, rating
+                FROM recommended_books
+            """, (user_id, user_id, limit))
+            return cur.fetchall()
+    except psycopg2.errors.UndefinedTable:
+        print("user_interactions table doesn't exist for collaborative filtering, creating it...")
+        create_user_interactions_table()
+        return []  # Return empty list for now
+    except Exception as e:
+        print("get_collaborative_recommendations_db error:", e)
+        return []
+    finally:
+        conn.close()
+
+def get_user_genre_preferences_db(user_id: int):
+    """Get user's preferred genres based on interaction history"""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT b.genre, COUNT(*) as interaction_count,
+                       AVG(CASE 
+                           WHEN ui.interaction_type = 'click' THEN 1
+                           WHEN ui.interaction_type = 'view' THEN 2  
+                           WHEN ui.interaction_type = 'wishlist_add' THEN 3
+                           ELSE 1 END) as preference_score
+                FROM user_interactions ui
+                JOIN books b ON ui.book_id = b.book_id
+                WHERE ui.user_id = %s 
+                AND b.genre IS NOT NULL
+                AND ui.interaction_type IN ('click', 'view', 'wishlist_add')
+                GROUP BY b.genre
+                HAVING COUNT(*) >= 2
+                ORDER BY preference_score DESC, interaction_count DESC
+                LIMIT 10
+            """, (user_id,))
+            return cur.fetchall()
+    except psycopg2.errors.UndefinedTable:
+        print("user_interactions table doesn't exist for genre preferences, creating it...")
+        create_user_interactions_table()
+        return []  # Return empty list for now
+    except Exception as e:
+        print("get_user_genre_preferences_db error:", e)
+        return []
+    finally:
+        conn.close()
+
+def get_content_based_recommendations_db(user_id: int, limit: int = 20):
+    """Get content-based recommendations using user's genre preferences"""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            # Get user's preferred genres
+            user_genres = get_user_genre_preferences_db(user_id)
+            if not user_genres:
+                # Fallback to user_interests table
+                cur.execute("SELECT genre FROM user_interests WHERE user_id = %s", (user_id,))
+                user_interests = cur.fetchall()
+                if user_interests:
+                    genre_conditions = " OR ".join(["LOWER(b.genre) ILIKE %s" for _ in user_interests])
+                    genre_params = [f"%{genre[0].lower()}%" for genre in user_interests]
+                else:
+                    return []
+            else:
+                genre_conditions = " OR ".join(["LOWER(b.genre) ILIKE %s" for _ in user_genres])
+                genre_params = [f"%{genre[0].lower()}%" for genre in user_genres]
+            
+            # Get books user has already interacted with
+            try:
+                cur.execute("""
+                    SELECT book_id FROM user_interactions 
+                    WHERE user_id = %s
+                """, (user_id,))
+                interacted_books = [row[0] for row in cur.fetchall()]
+            except psycopg2.errors.UndefinedTable:
+                # Table doesn't exist yet, no books to exclude
+                interacted_books = []
+            
+            exclude_clause = ""
+            if interacted_books:
+                exclude_clause = f"AND b.book_id NOT IN ({','.join(map(str, interacted_books))})"
+            
+            # Get recommendations based on preferred genres
+            query = f"""
+                SELECT b.book_id AS id, b.title, b.author, b.genre, 
+                       b.cover_image_url AS coverurl, b.rating
+                FROM books b
+                WHERE ({genre_conditions})
+                {exclude_clause}
+                AND b.rating >= 3.0
+                AND b.cover_image_url IS NOT NULL
+                ORDER BY b.rating DESC NULLS LAST, b.book_id
+                LIMIT %s
+            """
+            
+            params = genre_params + [limit]
+            cur.execute(query, params)
+            return cur.fetchall()
+            
+    except Exception as e:
+        print("get_content_based_recommendations_db error:", e)
+        return []
+    finally:
+        conn.close()
+
+def get_hybrid_recommendations_db(user_id: int, limit: int = 20):
+    """Get hybrid recommendations combining collaborative and content-based filtering"""
+    try:
+        # Get collaborative recommendations (40% weight)
+        collaborative_books = get_collaborative_recommendations_db(user_id, limit // 2)
+        
+        # Get content-based recommendations (40% weight)  
+        content_books = get_content_based_recommendations_db(user_id, limit // 2)
+        
+        # Get trending books as fallback (20% weight)
+        trending_result = get_trending_books_db('monthly', 1, limit // 4)
+        trending_books = trending_result['books'] if trending_result else []
+        
+        # Combine and remove duplicates
+        seen_ids = set()
+        combined_books = []
+        
+        # Add collaborative books first (highest priority)
+        for book in collaborative_books:
+            if book['id'] not in seen_ids:
+                book['recommendation_type'] = 'collaborative'
+                combined_books.append(book)
+                seen_ids.add(book['id'])
+        
+        # Add content-based books
+        for book in content_books:
+            if book['id'] not in seen_ids and len(combined_books) < limit:
+                book['recommendation_type'] = 'content_based'
+                combined_books.append(book)
+                seen_ids.add(book['id'])
+        
+        # Add trending books as fallback
+        for book in trending_books:
+            if book['id'] not in seen_ids and len(combined_books) < limit:
+                book['recommendation_type'] = 'trending'
+                combined_books.append(book)
+                seen_ids.add(book['id'])
+        
+        return combined_books[:limit]
+        
+    except Exception as e:
+        print("get_hybrid_recommendations_db error:", e)
+        return []
+
+def ensure_user_interactions_table():
+    """Ensure the user_interactions table exists - call this at startup"""
+    return create_user_interactions_table()
+
+def initialize_recommendation_tables():
+    """Initialize all required tables for the recommendation system"""
+    print("Initializing recommendation system tables...")
+    success = ensure_user_interactions_table()
+    if success:
+        print("✅ user_interactions table ready")
+    else:
+        print("❌ Failed to create user_interactions table")
+    return success
+
+# Add this function to handle the interaction recording from frontend
+def record_book_click(user_id: int, book_id: int, interaction_type: str = "click"):
+    """Record when user clicks on a book"""
+    return record_user_interaction_db(user_id, book_id, interaction_type)

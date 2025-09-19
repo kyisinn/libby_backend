@@ -7,7 +7,7 @@ from ...extensions import cache
 books_bp = Blueprint("books", __name__, url_prefix="/api/books")
 
 @books_bp.get("/search")
-@cache.cached(timeout=180, query_string=True)
+@cache.cached(timeout=30, query_string=True)  # Reduced from 180 to 30 seconds
 
 def search_books():
     q = request.args.get("q", "").strip()
@@ -18,7 +18,7 @@ def search_books():
         return jsonify({"error": "Database connection failed."}), 500
     return jsonify(results)
 @books_bp.get("/recommendations/globally-trending")
-@cache.cached(timeout=600, query_string=True)
+@cache.cached(timeout=60, query_string=True)  # Reduced from 600 to 60 seconds
 def globally_trending():
     period = request.args.get("period", "5years", type=str)
     page   = request.args.get("page", 1, type=int)
@@ -34,7 +34,7 @@ def globally_trending():
     })
 
 @books_bp.get("/recommendations/by-major")
-@cache.cached(timeout=600, query_string=True)
+@cache.cached(timeout=60, query_string=True)  # Reduced from 600 to 60 seconds
 def by_major():
     major = request.args.get("major", "Computer Science", type=str)
     page  = request.args.get("page", 1, type=int)

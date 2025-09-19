@@ -9,20 +9,26 @@ from libby_backend.cache import init_cache
 # =============================================================================
 # APPLICATION SETUP
 # =============================================================================
+from libby_backend.config import Config
+
 app = Flask(__name__)
+app.config.from_object(Config)
+
 CORS(
     app,
-    resources={
-        r"/api/*": {
-            "origins": ["https://libby-bot.vercel.app"],
-            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["Authorization", "Content-Type", "X-Requested-With"],
-            "expose_headers": ["Content-Type"],
-        }
-    },
-    supports_credentials=True,
+    resources=Config.CORS_RESOURCES,
+    supports_credentials=Config.CORS_SUPPORTS_CREDENTIALS,
+    allow_headers=Config.CORS_ALLOW_HEADERS,
+    expose_headers=Config.CORS_EXPOSE_HEADERS,
 )
 cache = init_cache(app)
+
+# Initialize database tables for recommendation system
+from libby_backend.database import initialize_recommendation_tables
+try:
+    initialize_recommendation_tables()
+except Exception as e:
+    print(f"Warning: Could not initialize recommendation tables: {e}")
 
 # =============================================================================
 # OPTIONAL BLUEPRINT REGISTRATION
@@ -32,17 +38,19 @@ cache = init_cache(app)
 
 from libby_backend.blueprints.books.routes import books_bp
 app.register_blueprint(books_bp, url_prefix="/api/books")
-# try:
-#     from blueprints.recommendations.routes import rec_bp
-#     app.register_blueprint(rec_bp, url_prefix="/api/recommendations")
-# except Exception:
-#     pass
+
+# Enable recommendations blueprint
+from libby_backend.blueprints.recommendations.routes import rec_bp
+app.register_blueprint(rec_bp, url_prefix="/api/recommendations")
 
 from libby_backend.blueprints.health.routes import health_bp
 app.register_blueprint(health_bp, url_prefix="/api/health")
 
 from libby_backend.blueprints.profile.routes import profile_bp
 app.register_blueprint(profile_bp, url_prefix="/api/profile")
+
+from libby_backend.blueprints.utils.routes import utils_bp
+app.register_blueprint(utils_bp, url_prefix="/api")
 
 # =============================================================================
 # HEALTH CHECK (fallback if no health blueprint is present)

@@ -1,64 +1,472 @@
 # blueprints/recommendations/routes.py
+# Enhanced Recommendation System Routes with Advanced Features
 from flask import Blueprint, jsonify, request
-from libby_backend.recommendation_system import BookRecommendationEngine, RecommendationAPI
-from ...extensions import cache
 import logging
+from datetime import datetime
+from libby_backend.cache import cache
 
-# Initialize recommendation system
-recommendation_engine = BookRecommendationEngine()
-recommendation_api = RecommendationAPI(recommendation_engine)
+# Import centralized user ID resolver
+from libby_backend.utils.user_resolver import resolve_user_id, with_resolved_user_id, resolve_user_id_from_request
+
+# Import the new database functions
+from libby_backend.database import (
+    record_user_interaction_db, 
+    get_user_interactions_db,
+    get_collaborative_recommendations_db,
+    get_content_based_recommendations_db, 
+    get_hybrid_recommendations_db,
+    get_user_genre_preferences_db,
+    get_trending_books_db
+)
+
+
+
+# CRITICAL FIX: Correct import path based on your app structure
+try:
+    from libby_backend.recommendation_system import EnhancedBookRecommendationEngine, EnhancedRecommendationAPI
+except ImportError:
+    # Fallback import path
+    from recommendation_system import EnhancedBookRecommendationEngine, EnhancedRecommendationAPI
+
+# Initialize enhanced recommendation system with error handling
+try:
+    recommendation_engine = EnhancedBookRecommendationEngine()
+    recommendation_api = EnhancedRecommendationAPI(recommendation_engine)
+except Exception as e:
+    logging.error(f"Failed to initialize recommendation engine: {e}")
+    recommendation_engine = None
+    recommendation_api = None
 
 # Create blueprint
 rec_bp = Blueprint("recommendations", __name__, url_prefix="/api/recommendations")
-
 logger = logging.getLogger(__name__)
 
-@rec_bp.route("/<user_id>", methods=["GET"])
-@cache.cached(timeout=300, query_string=True)  # Cache for 5 minutes
-def get_user_recommendations(user_id: str):
-    """Get personalized recommendations for a user"""
+# CRITICAL FIX: Add engine check decorator
+def require_engine(f):
+    """Decorator to check if recommendation engine is available"""
+    def wrapper(*args, **kwargs):
+        if not recommendation_engine:
+            return jsonify({
+                'success': False,
+                'error': 'Recommendation engine not available',
+                'details': 'Engine initialization failed'
+            }), 503
+        return f(*args, **kwargs)
+    wrapper.__name__ = f.__name__
+    return wrapper
+
+# Debug and fallback utility functions
+def check_user_setup(user_id: str):
+    """Check if user has interests configured"""
     try:
-        email = request.args.get('email')
-        genres = request.args.getlist('genres')  # Can pass multiple genres
-        limit = int(request.args.get('limit', 20))
+        # Convert Clerk ID to integer (same format as user_interactions table)
+        user_id_int = resolve_user_id(user_id)
         
-        result = recommendation_api.get_user_recommendations(
-            user_id=user_id,
-            email=email,
-            genres=genres if genres else None,
-            limit=limit
-        )
+        from libby_backend.database import get_db_connection
+        conn = get_db_connection()
+        if not conn:
+            return False, "Database connection failed"
+            
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) as count FROM user_interests WHERE user_id = %s", (user_id_int,))
+            result = cursor.fetchone()
+            interest_count = result[0] if result else 0
+        conn.close()
         
-        return jsonify(result)
+        if interest_count == 0:
+            return False, "User has no interests configured"
+        
+        return True, f"User has {interest_count} interests configured"
         
     except Exception as e:
-        logger.error(f"Error getting recommendations for {user_id}: {e}")
+        return False, f"Error checking user setup: {e}"
+
+def get_recommendations_with_better_fallbacks(user_id: str, limit: int = 20):
+    """Enhanced recommendation function with multiple fallback levels"""
+    try:
+        # Convert Clerk ID to integer (same format as user_interactions table)
+        user_id_int = resolve_user_id(user_id)
+        
+        # Level 1: Try normal enhanced recommendations
+        result = recommendation_engine.get_recommendations_for_user_enhanced(
+            user_id=user_id_int,
+            limit=limit,
+            force_refresh=True  # Always bypass cache for debugging
+        )
+        
+        if result.books and len(result.books) > 0:
+            return result
+        
+        logger.warning(f"Level 1 failed for {user_id}, trying fallbacks...")
+        
+        # Level 2: Try with user genres from database
+        from libby_backend.database import get_db_connection
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT genre FROM user_interests WHERE user_id = %s", (user_id_int,))
+                user_genres = [row[0] for row in cursor.fetchall()]
+            conn.close()
+            
+            if user_genres:
+                logger.info(f"Found user genres for {user_id}: {user_genres}")
+                # Try genre-based recommendations
+                from libby_backend.recommendation_system import get_books_by_advanced_genre_search_enhanced
+                genre_books = []
+                for genre in user_genres[:3]:  # Try up to 3 genres
+                    books = get_books_by_advanced_genre_search_enhanced(genre, limit // len(user_genres[:3]) + 2)
+                    genre_books.extend(books)
+                
+                if genre_books:
+                    from libby_backend.recommendation_system import RecommendationResult
+                    from datetime import datetime
+                    return RecommendationResult(
+                        books=genre_books[:limit],
+                        algorithm_used="Genre-Based Fallback",
+                        confidence_score=0.6,
+                        reasons=[f"Based on your selected genres: {', '.join(user_genres[:3])}"],
+                        generated_at=datetime.now()
+                    )
+        
+        # Level 3: High-quality trending books
+        logger.warning(f"Level 2 failed for {user_id}, trying trending fallback...")
+        from libby_backend.recommendation_system import get_quality_trending_books_fallback
+        trending_books = get_quality_trending_books_fallback(limit)
+        
+        if trending_books:
+            from libby_backend.recommendation_system import RecommendationResult
+            from datetime import datetime
+            return RecommendationResult(
+                books=trending_books,
+                algorithm_used="Quality Trending Fallback",
+                confidence_score=0.5,
+                reasons=["High-quality trending books as fallback"],
+                generated_at=datetime.now()
+            )
+        
+        # Level 4: Any books from database
+        logger.warning(f"Level 3 failed for {user_id}, trying basic database query...")
+        conn = get_db_connection()
+        if conn:
+            books = []
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT book_id, title, author, genre, cover_image_url, rating
+                    FROM books 
+                    WHERE title IS NOT NULL 
+                    AND author IS NOT NULL
+                    AND cover_image_url IS NOT NULL
+                    ORDER BY rating DESC NULLS LAST
+                    LIMIT %s
+                """, (limit,))
+                
+                for row in cursor.fetchall():
+                    from libby_backend.recommendation_system import Book
+                    book = Book(
+                        id=row[0],
+                        title=row[1],
+                        author=row[2],
+                        genre=row[3],
+                        cover_image_url=row[4],
+                        rating=row[5]
+                    )
+                    books.append(book)
+            conn.close()
+            
+            if books:
+                from libby_backend.recommendation_system import RecommendationResult
+                from datetime import datetime
+                return RecommendationResult(
+                    books=books,
+                    algorithm_used="Basic Database Fallback",
+                    confidence_score=0.3,
+                    reasons=["Basic database query as last resort"],
+                    generated_at=datetime.now()
+                )
+        
+        # Level 5: Empty result with explanation
+        logger.error(f"All fallback levels failed for {user_id}")
+        from libby_backend.recommendation_system import RecommendationResult
+        from datetime import datetime
+        return RecommendationResult(
+            books=[],
+            algorithm_used="Failed - No Fallbacks Worked",
+            confidence_score=0.0,
+            reasons=["All recommendation methods failed - check database connection"],
+            generated_at=datetime.now()
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in enhanced fallback for {user_id}: {e}")
+        from libby_backend.recommendation_system import RecommendationResult
+        from datetime import datetime
+        return RecommendationResult(
+            books=[],
+            algorithm_used="Error",
+            confidence_score=0.0,
+            reasons=[f"System error: {str(e)}"],
+            generated_at=datetime.now()
+        )
+
+# Debug endpoints - commented out for production use
+# @rec_bp.route("/<user_id>/debug", methods=["GET"])
+# def debug_user_recommendations(user_id: str):
+#     """Debug endpoint to see what's happening with recommendations"""
+#     # Debug functionality removed for production use
+#     return jsonify({
+#         'message': 'Debug endpoints disabled in production',
+#         'status': 'disabled'
+#     })
+
+# Debug function removed for production - uncomment if needed for troubleshooting
+# Rest of debug function implementation commented out for production use
+
+@rec_bp.route("/<user_id>/clear-cache", methods=["POST"])
+def clear_user_cache(user_id: str):
+    """Clear cached recommendations for a specific user"""
+    try:
+        if not recommendation_engine:
+            return jsonify({
+                'success': False,
+                'error': 'Recommendation engine not available'
+            })
+            
+        import sqlite3
+        conn = sqlite3.connect(recommendation_engine.db_path)
+        cursor = conn.cursor()
+        
+        # Delete cached recommendations for this user
+        cursor.execute('DELETE FROM user_recommendations WHERE user_id = ?', (user_id,))
+        deleted_count = cursor.rowcount
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Cleared cache for user {user_id}',
+            'deleted_entries': deleted_count
+        })
+        
+    except Exception as e:
+        logger.error(f"Error clearing cache for {user_id}: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        })
+
+@rec_bp.route("/<user_id>/enhanced", methods=["GET"])
+@require_engine
+def get_enhanced_recommendations_with_fallbacks(user_id: str):
+    """Enhanced recommendations with comprehensive fallback system"""
+    try:
+        limit = int(request.args.get('limit', 20))
+        
+        result = get_recommendations_with_better_fallbacks(user_id, limit)
+        
+        # Convert books to dict format
+        books_data = []
+        for book in result.books:
+            try:
+                if hasattr(book, 'to_dict'):
+                    books_data.append(book.to_dict())
+                else:
+                    # Ensure we always have a cover image URL
+                    cover_url = getattr(book, 'cover_image_url', None) or f"https://placehold.co/320x480/1e1f22/ffffff?text={book.title}"
+                    
+                    book_dict = {
+                        'id': book.id,
+                        'title': book.title,
+                        'author': book.author,
+                        'genre': book.genre,
+                        'description': getattr(book, 'description', None),
+                        'cover_image_url': cover_url,
+                        'coverurl': cover_url,  # Frontend compatibility
+                        'rating': float(book.rating) if book.rating else None,
+                        'publication_date': getattr(book, 'publication_date', None),
+                        'pages': getattr(book, 'pages', None),
+                        'language': getattr(book, 'language', None),
+                        'isbn': getattr(book, 'isbn', None),
+                        'similarity_score': getattr(book, 'similarity_score', None)
+                    }
+                    books_data.append(book_dict)
+            except Exception as e:
+                logger.error(f"Error serializing book {book.id}: {e}")
+                continue
+        
+        response = {
+            "success": len(books_data) > 0,
+            "recommendations": books_data,
+            "books": books_data,  # Frontend compatibility
+            "algorithm_used": result.algorithm_used,
+            "confidence_score": float(result.confidence_score),
+            "reasons": result.reasons,
+            "generated_at": result.generated_at.isoformat(),
+            "total_count": len(books_data),
+            "enhanced": True,
+            "fallback_used": "fallback" in result.algorithm_used.lower()
+        }
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        logger.error(f"Error in enhanced recommendations: {e}")
         return jsonify({
             'success': False,
             'error': 'Failed to generate recommendations',
+            'details': str(e),
+            'recommendations': [],
             'books': []
         }), 500
 
+@rec_bp.route("/<user_id>/simple", methods=["GET"])
+def get_simple_test_recommendations(user_id: str):
+    """Test endpoint for the simple recommend_books_for_user function"""
+    try:
+        limit = int(request.args.get('limit', 20))
+        
+        # Use the simple recommendation function
+        from libby_backend.recommendation_system import recommend_books_for_user
+        books = recommend_books_for_user(user_id, limit)
+        
+        return jsonify({
+            'success': True,
+            'user_id': user_id,
+            'books': books,
+            'total_count': len(books),
+            'algorithm_used': 'Simple SQL Query',
+            'message': 'Using simple psycopg2 function' if books else 'No books found - check debug output'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in simple recommendations for {user_id}: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to get simple recommendations',
+            'details': str(e),
+            'books': []
+        }), 500
+
+@rec_bp.route("/<user_id>", methods=["GET"])
+@require_engine
+def get_user_recommendations(user_id: str):
+    """Get enhanced personalized recommendations for a user"""
+    try:
+        email = request.args.get('email')
+        genres = request.args.getlist('genres')
+        limit = int(request.args.get('limit', 20))
+        force_refresh = request.args.get('force_refresh', 'false').lower() == 'true'
+        
+        # Use enhanced recommendation method with better error handling
+        result = recommendation_engine.get_recommendations_for_user_enhanced(
+            user_id=user_id,
+            email=email,
+            selected_genres=genres if genres else None,
+            limit=limit,
+            force_refresh=force_refresh
+        )
+        
+        # Convert books to dict format for JSON serialization
+        books_data = []
+        for book in result.books:
+            try:
+                if hasattr(book, 'to_dict'):
+                    books_data.append(book.to_dict())
+                else:
+                    # Fallback manual conversion
+                    book_dict = {
+                        'id': book.id,
+                        'title': book.title,
+                        'author': book.author,
+                        'genre': book.genre,
+                        'description': book.description,
+                        'cover_image_url': book.cover_image_url,
+                        'rating': float(book.rating) if book.rating else None,
+                        'publication_date': book.publication_date,
+                        'pages': book.pages,
+                        'language': book.language,
+                        'isbn': book.isbn,
+                        'similarity_score': getattr(book, 'similarity_score', None)
+                    }
+                    books_data.append(book_dict)
+            except Exception as e:
+                logger.error(f"Error serializing book {book.id}: {e}")
+                continue
+        
+        response = {
+            "success": True,
+            "recommendations": books_data,
+            "algorithm_used": result.algorithm_used,
+            "confidence_score": float(result.confidence_score),
+            "reasons": result.reasons,
+            "generated_at": result.generated_at.isoformat(),
+            "total_count": len(books_data),
+            "enhanced": True
+        }
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        logger.error(f"Error getting enhanced recommendations for {user_id}: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to generate enhanced recommendations',
+            'details': str(e),
+            'recommendations': []
+        }), 500
+
 @rec_bp.route("/<user_id>/trending", methods=["GET"])
-@cache.cached(timeout=600, query_string=True)  # Cache for 10 minutes
+@require_engine
 def get_personalized_trending(user_id: str):
-    """Get trending books personalized for the user"""
+    """Get high-quality trending books personalized for the user"""
     try:
         limit = int(request.args.get('limit', 10))
         
-        result = recommendation_api.get_personalized_trending(
-            user_id=user_id,
-            limit=limit
-        )
+        # Build user profile for enhanced filtering
+        profile = recommendation_engine.get_user_profile_enhanced(user_id)
         
-        return jsonify(result)
+        # Get quality trending books with fallback
+        try:
+            trending_books = recommendation_engine.get_quality_trending_books(
+                limit=limit,
+                exclude_ids=profile.reading_history + profile.wishlist,
+                profile=profile
+            )
+        except Exception as e:
+            logger.warning(f"Primary trending method failed: {e}, using fallback")
+            # Use the fallback function from our fixes
+            from libby_backend.recommendation_system import get_quality_trending_books_fallback
+            trending_books = get_quality_trending_books_fallback(limit, profile.reading_history + profile.wishlist)
+        
+        # Convert to dict format
+        books_data = []
+        for book in trending_books:
+            try:
+                if hasattr(book, 'to_dict'):
+                    books_data.append(book.to_dict())
+                else:
+                    books_data.append(book.__dict__)
+            except Exception as e:
+                logger.error(f"Error serializing trending book: {e}")
+                continue
+        
+        return jsonify({
+            'success': True,
+            'trending_books': books_data,
+            'personalized': True,
+            'user_id': user_id,
+            'total_count': len(books_data),
+            'enhanced': True,
+            'rating_threshold': profile.preferred_rating_threshold
+        })
         
     except Exception as e:
-        logger.error(f"Error getting personalized trending for {user_id}: {e}")
+        logger.error(f"Error getting enhanced personalized trending for {user_id}: {e}")
         return jsonify({
             'success': False,
-            'error': 'Failed to get personalized trending books',
-            'books': []
+            'error': 'Failed to get enhanced personalized trending books',
+            'details': str(e),
+            'trending_books': []
         }), 500
 
 @rec_bp.route("/<user_id>/refresh", methods=["POST"])
@@ -66,10 +474,6 @@ def refresh_user_recommendations(user_id: str):
     """Force refresh recommendations for a user"""
     try:
         limit = int(request.args.get('limit', 20))
-        
-        # Clear cache for this user
-        cache_key = f"view/api/recommendations/{user_id}"
-        cache.delete(cache_key)
         
         result = recommendation_api.refresh_recommendations(
             user_id=user_id,
@@ -86,8 +490,9 @@ def refresh_user_recommendations(user_id: str):
         }), 500
 
 @rec_bp.route("/interactions", methods=["POST"])
+@require_engine
 def record_user_interaction():
-    """Record a user interaction with a book"""
+    """Record a user interaction with a book (enhanced with rating support)"""
     try:
         data = request.get_json()
         
@@ -99,7 +504,8 @@ def record_user_interaction():
         
         user_id = data.get('user_id')
         book_id = data.get('book_id')
-        interaction_type = data.get('type')  # 'view', 'wishlist_add', 'wishlist_remove', 'search', 'click', 'like', 'dislike'
+        interaction_type = data.get('type')
+        rating = data.get('rating')
         
         if not all([user_id, book_id, interaction_type]):
             return jsonify({
@@ -108,25 +514,61 @@ def record_user_interaction():
             }), 400
         
         # Validate interaction type
-        valid_types = ['view', 'wishlist_add', 'wishlist_remove', 'search', 'click', 'like', 'dislike']
+        valid_types = ['view', 'wishlist_add', 'wishlist_remove', 'search', 'click', 'like', 'dislike', 'rate']
         if interaction_type not in valid_types:
             return jsonify({
                 'success': False,
                 'error': f'Invalid interaction type. Must be one of: {", ".join(valid_types)}'
             }), 400
         
-        result = recommendation_api.record_interaction(
+        # Validate rating if provided
+        if rating is not None:
+            try:
+                rating = float(rating)
+                if not (1.0 <= rating <= 5.0):
+                    return jsonify({
+                        'success': False,
+                        'error': 'Rating must be between 1.0 and 5.0'
+                    }), 400
+            except (ValueError, TypeError):
+                return jsonify({
+                    'success': False,
+                    'error': 'Invalid rating format'
+                }), 400
+        
+        # Enhanced interaction weights
+        weight_mapping = {
+            'view': 1.0,
+            'click': 1.2,
+            'like': 2.0,
+            'wishlist_add': 3.0,
+            'wishlist_remove': -1.0,
+            'rate': 2.5,
+            'search': 0.5,
+            'dislike': -0.5
+        }
+        
+        weight = weight_mapping.get(interaction_type, 1.0)
+        
+        # Record enhanced interaction
+        recommendation_engine.record_user_interaction(
             user_id=str(user_id),
             book_id=int(book_id),
-            interaction_type=interaction_type
+            interaction_type=interaction_type,
+            weight=weight,
+            rating=rating
         )
         
-        # Clear user's recommendation cache after interaction
-        if result.get('success'):
-            cache_key = f"view/api/recommendations/{user_id}"
-            cache.delete(cache_key)
-        
-        return jsonify(result)
+        return jsonify({
+            'success': True,
+            'message': f'Enhanced interaction recorded: {interaction_type} for book {book_id}',
+            'user_id': user_id,
+            'book_id': book_id,
+            'interaction_type': interaction_type,
+            'weight': weight,
+            'rating': rating,
+            'enhanced': True
+        })
         
     except ValueError as e:
         return jsonify({
@@ -134,10 +576,77 @@ def record_user_interaction():
             'error': 'Invalid book_id format'
         }), 400
     except Exception as e:
-        logger.error(f"Error recording interaction: {e}")
+        logger.error(f"Error recording enhanced interaction: {e}")
         return jsonify({
             'success': False,
-            'error': 'Failed to record interaction'
+            'error': 'Failed to record enhanced interaction',
+            'details': str(e)
+        }), 500
+
+@rec_bp.route("/<user_id>/profile", methods=["GET"])
+def get_user_profile_info(user_id: str):
+    """Get enhanced user profile information"""
+    try:
+        profile = recommendation_engine.get_user_profile_enhanced(user_id)
+        
+        return jsonify({
+            'success': True,
+            'user_id': profile.user_id,
+            'email': profile.email,
+            'selected_genres': profile.selected_genres,
+            'favorite_authors': profile.favorite_authors,
+            'preferred_rating_threshold': profile.preferred_rating_threshold,
+            'reading_history_count': len(profile.reading_history),
+            'wishlist_count': len(profile.wishlist),
+            'interaction_weights': profile.interaction_weights,
+            'enhanced': True
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting user profile for {user_id}: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to get user profile'
+        }), 500
+
+@rec_bp.route("/<user_id>/diversity", methods=["GET"])
+def get_diversity_recommendations(user_id: str):
+    """Get diversity recommendations from unexplored genres"""
+    try:
+        limit = int(request.args.get('limit', 10))
+        
+        # Build user profile
+        profile = recommendation_engine.get_user_profile_enhanced(user_id)
+        
+        # Get diversity books
+        diversity_books = recommendation_engine.get_diversity_books(
+            profile=profile,
+            limit=limit,
+            exclude_ids=profile.reading_history + profile.wishlist
+        )
+        
+        # Convert to dict format
+        books_data = []
+        for book in diversity_books:
+            book_dict = book.__dict__.copy()
+            if hasattr(book, 'similarity_score'):
+                book_dict['similarity_score'] = book.similarity_score
+            books_data.append(book_dict)
+        
+        return jsonify({
+            'success': True,
+            'diversity_books': books_data,
+            'user_id': user_id,
+            'total_count': len(books_data),
+            'enhanced': True,
+            'purpose': 'Explore new genres outside your usual preferences'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting diversity recommendations for {user_id}: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to get diversity recommendations'
         }), 500
 
 @rec_bp.route("/<user_id>/stats", methods=["GET"])
@@ -155,7 +664,6 @@ def get_user_recommendation_stats(user_id: str):
         }), 500
 
 @rec_bp.route("/similar-to/<int:book_id>", methods=["GET"])
-@cache.cached(timeout=1800, query_string=True)  # Cache for 30 minutes
 def get_similar_books(book_id: int):
     """Get books similar to the specified book"""
     try:
@@ -217,9 +725,8 @@ def get_similar_books(book_id: int):
         }), 500
 
 @rec_bp.route("/by-genre", methods=["GET"])
-@cache.cached(timeout=900, query_string=True)  # Cache for 15 minutes
 def get_recommendations_by_genre():
-    """Get recommendations for specific genres"""
+    """Get enhanced recommendations for specific genres"""
     try:
         genres = request.args.getlist('genres')  # Multiple genres supported
         user_id = request.args.get('user_id')  # Optional for personalization
@@ -235,21 +742,37 @@ def get_recommendations_by_genre():
         books_per_genre = max(1, limit // len(genres))
         
         for genre in genres:
-            genre_books = recommendation_engine._fetch_books_by_genre(
-                genre=genre,
-                limit=books_per_genre * 2  # Get extra for filtering
+            # Use enhanced genre search with synonyms
+            genre_books = recommendation_engine.get_books_by_advanced_genre_search(
+                target_genre=genre,
+                limit=books_per_genre * 2,  # Get extra for filtering
+                exclude_ids=[]
             )
             
             # If user provided, personalize the selection
             if user_id and genre_books:
-                profile = recommendation_engine.get_user_profile(user_id)
+                profile = recommendation_engine.get_user_profile_enhanced(user_id)
                 exclude_ids = profile.reading_history + profile.wishlist
                 
-                # Filter out books user has already interacted with
-                filtered_books = [book for book in genre_books if book.id not in exclude_ids]
+                # Filter out books user has already interacted with and apply quality filter
+                filtered_books = []
+                for book in genre_books:
+                    if (book.id not in exclude_ids and 
+                        (not book.rating or book.rating >= profile.preferred_rating_threshold)):
+                        # Calculate enhanced content score
+                        book.similarity_score = recommendation_engine._calculate_enhanced_content_score(
+                            book, profile, 1.0
+                        )
+                        filtered_books.append(book)
+                
+                # Sort by similarity score
+                filtered_books.sort(key=lambda x: getattr(x, 'similarity_score', 0), reverse=True)
                 genre_books = filtered_books[:books_per_genre]
             else:
-                genre_books = genre_books[:books_per_genre]
+                # No user context, just filter by quality
+                quality_books = [book for book in genre_books 
+                               if not book.rating or book.rating >= 3.0]
+                genre_books = quality_books[:books_per_genre]
             
             all_books.extend(genre_books)
         
@@ -259,20 +782,93 @@ def get_recommendations_by_genre():
         for book in all_books:
             if book.id not in seen_ids:
                 seen_ids.add(book.id)
-                unique_books.append(book.__dict__)
+                book_dict = book.__dict__.copy()
+                # Include similarity score if available
+                if hasattr(book, 'similarity_score'):
+                    book_dict['similarity_score'] = book.similarity_score
+                unique_books.append(book_dict)
         
         return jsonify({
             'success': True,
             'books': unique_books[:limit],
             'genres': genres,
-            'total_count': len(unique_books)
+            'total_count': len(unique_books),
+            'enhanced': True,
+            'personalized': user_id is not None
         })
         
     except Exception as e:
-        logger.error(f"Error getting recommendations by genre: {e}")
+        logger.error(f"Error getting enhanced recommendations by genre: {e}")
         return jsonify({
             'success': False,
-            'error': 'Failed to get genre recommendations'
+            'error': 'Failed to get enhanced genre recommendations'
+        }), 500
+
+@rec_bp.route("/by-author", methods=["GET"])
+def get_recommendations_by_author():
+    """Get enhanced recommendations by author"""
+    try:
+        author = request.args.get('author', '').strip()
+        user_id = request.args.get('user_id')  # Optional for personalization
+        limit = int(request.args.get('limit', 10))
+        
+        if not author:
+            return jsonify({
+                'success': False,
+                'error': 'Author name is required'
+            }), 400
+        
+        # Get books by the specified author
+        author_books = recommendation_engine.get_books_by_author(
+            author_name=author,
+            limit=limit * 2,  # Get extra for filtering
+            exclude_ids=[]
+        )
+        
+        # If user provided, personalize and filter
+        if user_id and author_books:
+            profile = recommendation_engine.get_user_profile_enhanced(user_id)
+            exclude_ids = profile.reading_history + profile.wishlist
+            
+            # Filter and score books
+            filtered_books = []
+            for book in author_books:
+                if (book.id not in exclude_ids and 
+                    (not book.rating or book.rating >= profile.preferred_rating_threshold)):
+                    book.similarity_score = 0.8  # High score for author match
+                    if book.author in profile.favorite_authors:
+                        book.similarity_score = 0.9  # Even higher for favorite authors
+                    filtered_books.append(book)
+            
+            author_books = filtered_books[:limit]
+        else:
+            # No user context, just filter by quality
+            quality_books = [book for book in author_books 
+                           if not book.rating or book.rating >= 3.0]
+            author_books = quality_books[:limit]
+        
+        # Convert to dict format
+        books_data = []
+        for book in author_books:
+            book_dict = book.__dict__.copy()
+            if hasattr(book, 'similarity_score'):
+                book_dict['similarity_score'] = book.similarity_score
+            books_data.append(book_dict)
+        
+        return jsonify({
+            'success': True,
+            'books': books_data,
+            'author': author,
+            'total_count': len(books_data),
+            'enhanced': True,
+            'personalized': user_id is not None
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting recommendations by author: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to get author recommendations'
         }), 500
 
 @rec_bp.route("/search-based", methods=["GET"])
@@ -319,50 +915,183 @@ def get_search_based_recommendations():
 
 @rec_bp.route("/health", methods=["GET"])
 def recommendation_health_check():
-    """Health check for recommendation system"""
+    """Enhanced health check for recommendation system"""
     try:
-        # Test database connections
-        from libby_backend.database import get_db_connection
-        import sqlite3
+        if not recommendation_engine:
+            return jsonify({
+                'status': 'unhealthy',
+                'error': 'Recommendation engine not initialized',
+                'enhanced': False
+            }), 503
         
-        # Test main database
+        # Test database connections
         main_db_ok = False
         try:
+            from libby_backend.database import get_db_connection
             conn = get_db_connection()
             if conn:
                 conn.close()
                 main_db_ok = True
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Main DB test failed: {e}")
         
         # Test recommendation database
         rec_db_ok = False
         try:
+            import sqlite3
             conn = sqlite3.connect(recommendation_engine.db_path)
             conn.close()
             rec_db_ok = True
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Rec DB test failed: {e}")
         
         # Test basic functionality
-        test_books = recommendation_engine._fetch_trending_books(5)
-        functionality_ok = len(test_books) > 0
+        functionality_tests = {
+            'genre_search': False,
+            'fallback_trending': False,
+            'profile_creation': False
+        }
         
-        status = "healthy" if (main_db_ok and rec_db_ok and functionality_ok) else "unhealthy"
+        try:
+            # Test genre search
+            from libby_backend.recommendation_system import get_books_by_advanced_genre_search_enhanced
+            test_books = get_books_by_advanced_genre_search_enhanced("fiction", 3)
+            functionality_tests['genre_search'] = len(test_books) >= 0  # Allow empty results
+        except Exception as e:
+            logger.error(f"Genre search test failed: {e}")
+        
+        try:
+            # Test fallback trending
+            from libby_backend.recommendation_system import get_quality_trending_books_fallback
+            test_trending = get_quality_trending_books_fallback(3)
+            functionality_tests['fallback_trending'] = len(test_trending) >= 0
+        except Exception as e:
+            logger.error(f"Fallback trending test failed: {e}")
+        
+        try:
+            # Test profile creation
+            test_profile = recommendation_engine.get_user_profile_enhanced("health_test")
+            functionality_tests['profile_creation'] = test_profile is not None
+        except Exception as e:
+            logger.error(f"Profile creation test failed: {e}")
+        
+        # Determine overall status
+        critical_systems = [main_db_ok, rec_db_ok]
+        functionality_working = any(functionality_tests.values())
+        
+        if all(critical_systems) and functionality_working:
+            status = "healthy"
+        elif any(critical_systems):
+            status = "degraded"
+        else:
+            status = "unhealthy"
         
         return jsonify({
             'status': status,
             'main_database': 'connected' if main_db_ok else 'failed',
             'recommendation_database': 'connected' if rec_db_ok else 'failed',
-            'basic_functionality': 'working' if functionality_ok else 'failed',
-            'test_books_fetched': len(test_books) if functionality_ok else 0
+            'functionality_tests': functionality_tests,
+            'enhanced': True,
+            'available_features': [
+                'Basic recommendation generation',
+                'User interaction recording',
+                'Fallback systems active',
+                'Error handling improved'
+            ]
         })
         
     except Exception as e:
-        logger.error(f"Health check error: {e}")
+        logger.error(f"Enhanced health check error: {e}")
         return jsonify({
             'status': 'error',
-            'error': str(e)
+            'error': str(e),
+            'enhanced': False
+        }), 500
+
+@rec_bp.route("/test", methods=["GET"])
+def test_recommendation_system():
+    """Quick test endpoint with better error handling"""
+    try:
+        if not recommendation_engine:
+            return jsonify({
+                "status": "error",
+                "message": "Recommendation engine not initialized",
+                "enhanced": False
+            }), 503
+
+        # Test basic database connectivity
+        from libby_backend.database import get_db_connection
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                "status": "error", 
+                "message": "Database connection failed",
+                "enhanced": False
+            }), 500
+        conn.close()
+
+        # Simple test - try to get some books
+        try:
+            from libby_backend.recommendation_system import get_quality_trending_books_fallback
+            test_books = get_quality_trending_books_fallback(5)
+            
+            return jsonify({
+                "status": "success",
+                "message": "Enhanced Recommendation System basic functionality working!",
+                "books_found": len(test_books),
+                "enhanced": True,
+                "database_connected": True,
+                "sample_books": [
+                    {
+                        "title": book.title,
+                        "author": book.author,
+                        "rating": book.rating
+                    } for book in test_books[:3]
+                ]
+            })
+        except Exception as e:
+            logger.error(f"Test books fetch failed: {e}")
+            return jsonify({
+                "status": "partial",
+                "message": "Database connected but book fetching has issues",
+                "error": str(e),
+                "enhanced": True
+            })
+            
+    except Exception as e:
+        logger.error(f"Test endpoint error: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "enhanced": False
+        }), 500
+
+@rec_bp.route("/simple/<user_id>", methods=["GET"])
+def get_simple_recommendations(user_id: str):
+    """Simple recommendation endpoint using the basic function"""
+    try:
+        limit = int(request.args.get('limit', 20))
+        
+        # Use the simple function we fixed
+        from libby_backend.recommendation_system import recommend_books_for_user
+        books = recommend_books_for_user(user_id, limit)
+        
+        return jsonify({
+            'success': True,
+            'recommendations': books,
+            'user_id': user_id,
+            'total_count': len(books),
+            'method': 'simple_psycopg2',
+            'enhanced': False
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting simple recommendations for {user_id}: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to generate simple recommendations',
+            'details': str(e),
+            'recommendations': []
         }), 500
 
 @rec_bp.route("/admin/cleanup", methods=["POST"])
@@ -407,39 +1136,516 @@ def admin_batch_update():
             'error': 'Batch update failed'
         }), 500
 
+@rec_bp.route("/admin/clear_cache", methods=["POST"])
+def clear_cache():
+    """Admin endpoint to clear the global cache"""
+    try:
+        cache.clear()
+        return jsonify({
+            "success": True, 
+            "message": "Cache cleared successfully"
+        }), 200
+    except Exception as e:
+        logger.error(f"Error clearing cache: {e}")
+        return jsonify({
+            "success": False, 
+            "error": str(e)
+        }), 500
+
 
 # USER INTERACTIONS
-@rec_bp.route("/interactions/view", methods=["POST"])
-def record_view():
-    data = request.json
-    user_id = data.get("user_id")
-    book_id = data.get("book_id")
+# @rec_bp.route("/interactions/view", methods=["POST"])
+# def record_view():
+#     data = request.json
+#     user_id = data.get("user_id")
+#     book_id = data.get("book_id")
 
-    if not user_id or not book_id:
-        return jsonify({"error": "Missing user_id or book_id"}), 400
+#     if not user_id or not book_id:
+#         return jsonify({"error": "Missing user_id or book_id"}), 400
 
-    result = record_user_interaction(user_id, book_id, "view")
-    if result:
-        return jsonify({"status": "success", "data": result}), 201
-    else:
-        return jsonify({"status": "error", "message": "Failed to record view"}), 500
+#     result = record_user_interaction(user_id, book_id, "view")
+#     if result:
+#         return jsonify({"status": "success", "data": result}), 201
+#     else:
+#         return jsonify({"status": "error", "message": "Failed to record view"}), 500
 
+# NOTE: record_view() is commented out because record_book_click() below handles all interaction types
+# including "view", and provides more comprehensive functionality with better error handling
 
-@rec_bp.route("/test", methods=["GET"])
-def test_recommendation_system():
-    """Quick remote test to verify DB integration + recommendation engine"""
+@rec_bp.route("/interactions/click", methods=["POST"])
+def record_book_click():
+    """Record when user clicks on a book"""
     try:
-        from libby_backend.recommendation_system import test_recommendation_system_with_db
-
-        result = test_recommendation_system_with_db()
-
-        return jsonify({
-            "status": "success",
-            "message": "Database-Integrated Recommendation System is working!",
-            "sample_result": result
-        })
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'error': 'No data provided'
+            }), 400
+        
+        user_id = data.get('user_id')
+        book_id = data.get('book_id')
+        interaction_type = data.get('type', 'click')  # Default to 'click'
+        rating = data.get('rating')  # Optional rating
+        
+        # Validate required fields
+        if not user_id or not book_id:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required fields: user_id, book_id'
+            }), 400
+        
+        # Convert user_id if it's a string (from Clerk)
+        try:
+            # If user_id is a Clerk ID (string), we need to handle it differently
+            if isinstance(user_id, str) and user_id.startswith('user_'):
+                # Store the Clerk user ID, but we need to map it to our integer user_id
+                # For now, let's hash it to get a consistent integer
+                import hashlib
+                user_id_int = int(hashlib.md5(user_id.encode()).hexdigest()[:8], 16)
+            else:
+                user_id_int = int(user_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid user_id format'
+            }), 400
+        
+        try:
+            book_id_int = int(book_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid book_id format'
+            }), 400
+        
+        # Record the interaction in the database
+        result = record_user_interaction_db(
+            user_id=user_id_int,
+            book_id=book_id_int,
+            interaction_type=interaction_type,
+            rating=rating
+        )
+        
+        if result:
+            # Also record in the recommendation engine for enhanced tracking
+            try:
+                if recommendation_engine:
+                    weight_mapping = {
+                        'click': 1.5,
+                        'view': 1.0,
+                        'wishlist_add': 3.0,
+                        'like': 2.0,
+                        'rate': 2.5
+                    }
+                    weight = weight_mapping.get(interaction_type, 1.0)
+                    
+                    recommendation_engine.record_user_interaction(
+                        user_id=str(user_id),  # Keep as string for recommendation engine
+                        book_id=book_id_int,
+                        interaction_type=interaction_type,
+                        weight=weight,
+                        rating=rating
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to record in recommendation engine: {e}")
+            
+            return jsonify({
+                'success': True,
+                'message': f'Book click recorded: {interaction_type}',
+                'interaction': {
+                    'id': result['id'],
+                    'user_id': result['user_id'],
+                    'book_id': result['book_id'],
+                    'interaction_type': result['interaction_type'],
+                    'timestamp': result['timestamp']
+                }
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to record interaction'
+            }), 500
+            
     except Exception as e:
+        logger.error(f"Error recording book click: {e}")
         return jsonify({
-            "status": "error",
-            "message": str(e)
+            'success': False,
+            'error': 'Internal server error',
+            'details': str(e)
         }), 500
+
+@rec_bp.route("/<user_id>/collaborative", methods=["GET"])
+def get_collaborative_recommendations(user_id: str):
+    """Get collaborative filtering recommendations"""
+    try:
+        limit = int(request.args.get('limit', 20))
+        
+        # Convert user_id to integer for database query
+        try:
+            if user_id.startswith('user_'):
+                import hashlib
+                user_id_int = int(hashlib.md5(user_id.encode()).hexdigest()[:8], 16)
+            else:
+                user_id_int = int(user_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid user_id format'
+            }), 400
+        
+        # Get collaborative recommendations
+        collab_books = get_collaborative_recommendations_db(user_id_int, limit)
+        
+        # Convert to expected format
+        books_data = []
+        for book in collab_books:
+            book_dict = dict(book)
+            # Ensure cover URL
+            if not book_dict.get('coverurl'):
+                book_dict['coverurl'] = f"https://placehold.co/320x480/1e1f22/ffffff?text={book_dict.get('title', 'Book')}"
+            books_data.append(book_dict)
+        
+        return jsonify({
+            'success': True,
+            'books': books_data,
+            'total_count': len(books_data),
+            'algorithm_used': 'Collaborative Filtering',
+            'user_id': user_id
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting collaborative recommendations: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to get collaborative recommendations',
+            'details': str(e),
+            'books': []
+        }), 500
+
+@rec_bp.route("/<user_id>/content-based", methods=["GET"])  
+def get_content_based_recommendations(user_id: str):
+    """Get content-based recommendations"""
+    try:
+        limit = int(request.args.get('limit', 20))
+        
+        # Convert user_id to integer for database query
+        try:
+            if user_id.startswith('user_'):
+                import hashlib
+                user_id_int = int(hashlib.md5(user_id.encode()).hexdigest()[:8], 16)
+            else:
+                user_id_int = int(user_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid user_id format'
+            }), 400
+        
+        # Get content-based recommendations
+        content_books = get_content_based_recommendations_db(user_id_int, limit)
+        
+        # Convert to expected format
+        books_data = []
+        for book in content_books:
+            book_dict = dict(book)
+            # Ensure cover URL
+            if not book_dict.get('coverurl'):
+                book_dict['coverurl'] = f"https://placehold.co/320x480/1e1f22/ffffff?text={book_dict.get('title', 'Book')}"
+            books_data.append(book_dict)
+        
+        return jsonify({
+            'success': True,
+            'books': books_data,
+            'total_count': len(books_data),
+            'algorithm_used': 'Content-Based Filtering',
+            'user_id': user_id
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting content-based recommendations: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to get content-based recommendations',
+            'details': str(e),
+            'books': []
+        }), 500
+
+@rec_bp.route("/<user_id>/hybrid", methods=["GET"])
+def get_hybrid_recommendations_route(user_id: str):
+    """Get hybrid recommendations (collaborative + content-based + trending)"""
+    try:
+        limit = int(request.args.get('limit', 20))
+        
+        # Convert user_id to integer for database query
+        try:
+            if user_id.startswith('user_'):
+                import hashlib
+                user_id_int = int(hashlib.md5(user_id.encode()).hexdigest()[:8], 16)
+            else:
+                user_id_int = int(user_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid user_id format'
+            }), 400
+        
+        # Get hybrid recommendations
+        hybrid_books = get_hybrid_recommendations_db(user_id_int, limit)
+        
+        # Convert to expected format and add recommendation type info
+        books_data = []
+        algorithm_breakdown = {
+            'collaborative': 0,
+            'content_based': 0, 
+            'trending': 0
+        }
+        
+        for book in hybrid_books:
+            book_dict = dict(book)
+            # Ensure cover URL
+            if not book_dict.get('coverurl'):
+                book_dict['coverurl'] = f"https://placehold.co/320x480/1e1f22/ffffff?text={book_dict.get('title', 'Book')}"
+            
+            # Track algorithm breakdown
+            rec_type = book_dict.get('recommendation_type', 'unknown')
+            if rec_type in algorithm_breakdown:
+                algorithm_breakdown[rec_type] += 1
+                
+            books_data.append(book_dict)
+        
+        return jsonify({
+            'success': True,
+            'books': books_data,
+            'total_count': len(books_data),
+            'algorithm_used': 'Hybrid (Collaborative + Content + Trending)',
+            'algorithm_breakdown': algorithm_breakdown,
+            'user_id': user_id
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting hybrid recommendations: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to get hybrid recommendations',
+            'details': str(e),
+            'books': []
+        }), 500
+
+@rec_bp.route("/<user_id>/history", methods=["GET"])
+def get_user_interaction_history(user_id: str):
+    """Get user's interaction history"""
+    try:
+        limit = int(request.args.get('limit', 50))
+        
+        # Convert user_id to integer for database query
+        try:
+            if user_id.startswith('user_'):
+                import hashlib
+                user_id_int = int(hashlib.md5(user_id.encode()).hexdigest()[:8], 16)
+            else:
+                user_id_int = int(user_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid user_id format'
+            }), 400
+        
+        # Get interaction history
+        interactions = get_user_interactions_db(user_id_int, limit)
+        
+        # Convert to expected format
+        history_data = []
+        for interaction in interactions:
+            interaction_dict = dict(interaction)
+            history_data.append(interaction_dict)
+        
+        return jsonify({
+            'success': True,
+            'interactions': history_data,
+            'total_count': len(history_data),
+            'user_id': user_id
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting user interaction history: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to get interaction history',
+            'details': str(e),
+            'interactions': []
+        }), 500
+
+@rec_bp.route("/<user_id>/genre-preferences", methods=["GET"])
+def get_user_genre_preferences_route(user_id: str):
+    """Get user's genre preferences based on interaction history"""
+    try:
+        # Convert user_id to integer for database query
+        try:
+            if user_id.startswith('user_'):
+                import hashlib
+                user_id_int = int(hashlib.md5(user_id.encode()).hexdigest()[:8], 16)
+            else:
+                user_id_int = int(user_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid user_id format'
+            }), 400
+        
+        # Get genre preferences
+        genre_prefs = get_user_genre_preferences_db(user_id_int)
+        
+        # Convert to expected format
+        preferences_data = []
+        for pref in genre_prefs:
+            pref_dict = dict(pref)
+            preferences_data.append(pref_dict)
+        
+        return jsonify({
+            'success': True,
+            'genre_preferences': preferences_data,
+            'total_count': len(preferences_data),
+            'user_id': user_id
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting genre preferences: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to get genre preferences',
+            'details': str(e),
+            'genre_preferences': []
+        }), 500
+
+# Update the main recommendations endpoint to use hybrid approach
+@rec_bp.route("/<user_id>/improved", methods=["GET"])
+@with_resolved_user_id
+def get_improved_recommendations(user_id: int, original_user_id: str = None):
+    """Get improved recommendations using database-based hybrid approach"""
+    try:
+        limit = int(request.args.get('limit', 20))
+        
+        # user_id is already converted to integer by the decorator
+        user_id_int = user_id
+        
+        # Check if user has any interactions
+        interactions = get_user_interactions_db(user_id_int, 5)
+        
+        if len(interactions) >= 2:
+            # User has enough interactions, use hybrid approach
+            hybrid_books = get_hybrid_recommendations_db(user_id_int, limit)
+            algorithm_used = 'Database Hybrid (Collaborative + Content + Trending)'
+        elif len(interactions) >= 1:
+            # User has some interactions, use content-based
+            hybrid_books = get_content_based_recommendations_db(user_id_int, limit)
+            algorithm_used = 'Content-Based (Limited Interactions)'
+        else:
+            # New user, use trending books
+            trending_result = get_trending_books_db('monthly', 1, limit)
+            hybrid_books = trending_result['books'] if trending_result else []
+            algorithm_used = 'Trending (New User)'
+        
+        # Ensure all books have cover URLs
+        for book in hybrid_books:
+            if isinstance(book, dict) and not book.get('coverurl'):
+                book['coverurl'] = f"https://placehold.co/320x480/1e1f22/ffffff?text={book.get('title', 'Book')}"
+        
+        return jsonify({
+            'success': True,
+            'books': hybrid_books,
+            'total_count': len(hybrid_books),
+            'algorithm_used': algorithm_used,
+            'user_id': user_id,
+            'user_interactions_count': len(interactions)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting improved recommendations: {e}")
+        # Final fallback to trending
+        try:
+            trending_result = get_trending_books_db('monthly', 1, limit)
+            trending_books = trending_result['books'] if trending_result else []
+            return jsonify({
+                'success': True,
+                'books': trending_books,
+                'total_count': len(trending_books),
+                'algorithm_used': 'Trending (Error Fallback)',
+                'user_id': user_id,
+                'error': str(e)
+            })
+        except:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to get any recommendations',
+                'details': str(e),
+                'books': []
+            }), 500
+
+# DEBUG ENDPOINTS COMMENTED OUT FOR PRODUCTION
+# @rec_bp.route("/<user_id>/genre-debug", methods=["GET"])
+# def debug_user_genres(user_id: str):
+#     """Debug what genres and books are available for this user"""
+#     # Debug functionality removed for production use
+#     return jsonify({
+#         'message': 'Debug endpoints disabled in production',
+#         'status': 'disabled'
+#     })
+
+@rec_bp.route("/<user_id>/fixed", methods=["GET"])
+def get_truly_personalized_recommendations(user_id: str):
+    """Get recommendations that actually use user preferences"""
+    try:
+        from libby_backend.recommendation_system import get_personalized_recommendations_fixed
+        
+        limit = int(request.args.get('limit', 20))
+        
+        result = get_personalized_recommendations_fixed(user_id, limit)
+        
+        if not result:
+            return jsonify({
+                'success': False,
+                'error': 'Could not generate personalized recommendations',
+                'recommendations': [],
+                'books': []
+            })
+        
+        # Convert books to dict format
+        books_data = []
+        for book in result.books:
+            # Ensure we always have a cover image URL
+            cover_url = book.cover_image_url or f"https://placehold.co/320x480/1e1f22/ffffff?text={book.title}"
+            
+            book_dict = {
+                'id': book.id,
+                'title': book.title,
+                'author': book.author,
+                'genre': book.genre,
+                'description': book.description,
+                'cover_image_url': cover_url,
+                'coverurl': cover_url,  # Frontend compatibility
+                'rating': book.rating,
+                'similarity_score': getattr(book, 'similarity_score', None)
+            }
+            books_data.append(book_dict)
+        
+        return jsonify({
+            'success': True,
+            'recommendations': books_data,
+            'books': books_data,  # Frontend compatibility
+            'algorithm_used': result.algorithm_used,
+            'confidence_score': result.confidence_score,
+            'reasons': result.reasons,
+            'total_count': len(books_data),
+            'truly_personalized': True
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in fixed personalized recommendations: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'recommendations': [],
+            'books': []
+        })

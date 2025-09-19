@@ -9,11 +9,16 @@ class Config:
 
     # --- CORS ---
     FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "https://libby-bot.vercel.app")
-    EXTRA_ORIGINS = os.getenv("EXTRA_ORIGINS", "http://localhost:3000").split(",")
+    EXTRA_ORIGINS = os.getenv("EXTRA_ORIGINS", "http://localhost:3000,http://localhost:3001").split(",")
 
     CORS_RESOURCES = {
         r"/api/*": {
-            "origins": [FRONTEND_ORIGIN, *[o.strip() for o in EXTRA_ORIGINS if o.strip()]],
+            "origins": [
+                FRONTEND_ORIGIN, 
+                "http://localhost:3000",  # Explicitly allow localhost:3000
+                "http://localhost:3001",  # Also allow 3001 for dev
+                *[o.strip() for o in EXTRA_ORIGINS if o.strip()]
+            ],
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         }
     }
