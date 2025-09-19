@@ -17,6 +17,8 @@ def search_books():
     if results is None:
         return jsonify({"error": "Database connection failed."}), 500
     return jsonify(results)
+
+
 @books_bp.get("/recommendations/globally-trending")
 @cache.cached(timeout=60, query_string=True)  # Reduced from 600 to 60 seconds
 def globally_trending():

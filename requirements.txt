@@ -7,3 +7,4 @@ PyJWT==2.10.1
 Flask-Caching==2.3.0
 redis==5.0.8
 sqlalchemy==2.0.23
+clerk-backend-api==3.3.0

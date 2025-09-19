@@ -100,91 +100,7 @@ def get_db_connection():
         print("DB connect error:", e)
         return None
 
-# -----------------------------------------------------------------------------
-# USER AUTH OPERATIONS  (matches your existing users table)
-# Columns: user_id, first_name, last_name, email, phone, membership_type, is_active
-# Added: password_hash, created_at (make sure these columns exist)
-# -----------------------------------------------------------------------------
-def get_user_by_email(email: str):
-    conn = get_db_connection()
-    if not conn:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT user_id, email, password_hash, first_name, last_name, phone,
-                       membership_type, is_active, created_at
-                FROM users
-                WHERE lower(email) = lower(%s)
-                LIMIT 1
-            """, (email,))
-            return cur.fetchone()
-    except Exception as e:
-        print("get_user_by_email error:", e)
-        return None
-    finally:
-        conn.close()
 
-def get_user_by_id(user_id: int):
-    conn = get_db_connection()
-    if not conn:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT user_id, email, first_name, last_name, phone,
-                       membership_type, is_active, created_at
-                FROM users
-                WHERE user_id = %s
-                LIMIT 1
-            """, (user_id,))
-            return cur.fetchone()
-    except Exception as e:
-        print("get_user_by_id error:", e)
-        return None
-    finally:
-        conn.close()
-
-def create_user(email: str, password_hash: str,
-                first_name: str | None, last_name: str | None,
-                phone: str | None):
-    conn = get_db_connection()
-    if not conn:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO users (email, password_hash, first_name, last_name, phone, is_active)
-                VALUES (%s, %s, %s, %s, %s, TRUE)
-                RETURNING user_id, email, first_name, last_name, phone,
-                          membership_type, is_active, created_at
-            """, (email, password_hash, first_name, last_name, phone))
-            user = cur.fetchone()
-            conn.commit()
-            return user
-    except Exception as e:
-        print("create_user error:", e)
-        # Handle duplicate email robustly
-        if "duplicate key value" in str(e).lower() or "unique constraint" in str(e).lower():
-            return {"_duplicate": True}
-        return None
-    finally:
-        conn.close()
-
-def update_user_full_name(user_id: int, full_name: str) -> bool:
-  conn = get_db_connection()
-  if not conn:
-    return False
-  try:
-    with conn.cursor() as cur:
-      cur.execute("UPDATE users SET full_name = %s WHERE user_id = %s", (full_name, user_id))
-      conn.commit()
-      return True
-  except Exception as e:
-    print("update_user_full_name error:", e)
-    return False
-  finally:
-    conn.close()
 
 # -----------------------------------------------------------------------------
 # BOOK SEARCH
@@ -194,28 +110,74 @@ def search_books_db(query):
     if not conn:
         return None
     try:
+        query_words = query.strip().split()
+        
         with conn.cursor() as cursor:
-            search_query = f"%{query}%"
-            cursor.execute("""
-                SELECT DISTINCT
-                    b.book_id AS id,
-                    b.title,
-                    b.cover_image_url AS coverurl,
-                    COALESCE(b.author, 'Unknown Author') AS author,
-                    b.rating
-                FROM books b
-                WHERE b.title ILIKE %s 
-                   OR b.author ILIKE %s
-                   OR b.genre ILIKE %s
-                ORDER BY b.rating DESC NULLS LAST
+            # Build conditions for exact word matches vs partial matches
+            exact_conditions = []
+            partial_conditions = []
+            params = []
+            
+            for word in query_words:
+                # Exact word match using word boundaries
+                word_boundary = f'\\m{word}\\M'  # PostgreSQL word boundaries
+                word_pattern = f"%{word}%"
+                
+                # Exact word conditions (higher priority)
+                exact_conditions.append("(b.title ~* %s OR b.author ~* %s OR b.genre ~* %s)")
+                params.extend([word_boundary, word_boundary, word_boundary])
+                
+                # Partial match conditions (fallback)
+                partial_conditions.append("(b.title ILIKE %s OR b.author ILIKE %s OR b.genre ILIKE %s)")
+                params.extend([word_pattern, word_pattern, word_pattern])
+            
+            # Combine conditions: prefer exact matches, allow partial as fallback
+            exact_clause = " AND ".join(exact_conditions)
+            partial_clause = " AND ".join(partial_conditions)
+            
+            sql = f"""
+                WITH exact_matches AS (
+                    SELECT DISTINCT
+                        b.book_id AS id,
+                        b.title,
+                        b.cover_image_url AS coverurl,
+                        COALESCE(b.author, 'Unknown Author') AS author,
+                        b.rating,
+                        1 as match_type
+                    FROM books b
+                    WHERE {exact_clause}
+                ),
+                partial_matches AS (
+                    SELECT DISTINCT
+                        b.book_id AS id,
+                        b.title,
+                        b.cover_image_url AS coverurl,
+                        COALESCE(b.author, 'Unknown Author') AS author,
+                        b.rating,
+                        2 as match_type
+                    FROM books b
+                    WHERE {partial_clause}
+                    AND b.book_id NOT IN (SELECT id FROM exact_matches)
+                )
+                SELECT id, title, coverurl, author, rating
+                FROM (
+                    SELECT * FROM exact_matches
+                    UNION ALL
+                    SELECT * FROM partial_matches
+                ) combined
+                ORDER BY match_type ASC, rating DESC NULLS LAST
                 LIMIT 50
-            """, (search_query, search_query, search_query))
+            """
+            
+            cursor.execute(sql, params)
             return cursor.fetchall()
+            
     except Exception as e:
         print("Railway search error:", e)
         return None
     finally:
         conn.close()
+
 
 
 # -----------------------------------------------------------------------------
@@ -266,22 +228,38 @@ def get_trending_books_db(period, page, per_page):
                         b.cover_image_url IS NOT NULL 
                         AND b.cover_image_url <> ''
                         AND b.rating IS NOT NULL
+                        AND (
+                            CASE 
+                                WHEN EXTRACT(YEAR FROM b.publication_date) > 2025
+                                THEN b.publication_date - INTERVAL '543 years'
+                                ELSE b.publication_date
+                            END
+                        ) >= CURRENT_DATE - INTERVAL %s
                 )
-                SELECT id, title, coverurl, rating, author
+                SELECT id, title, coverurl, rating, author, corrected_date AS publication_date
                 FROM trending_books
                 ORDER BY date_priority ASC, rating DESC, corrected_date DESC NULLS LAST
                 LIMIT %s OFFSET %s
-            """, (interval_period, per_page, offset))
+            """, (interval_period, interval_period, per_page, offset))
             books = cursor.fetchall()
 
+            # Get total count for pagination - only books matching the period filter
             cursor.execute("""
                 SELECT COUNT(DISTINCT b.book_id) AS count
                 FROM books b
                 WHERE b.cover_image_url IS NOT NULL 
                   AND b.cover_image_url <> ''
                   AND b.rating IS NOT NULL
-            """)
+                  AND (
+                      CASE 
+                          WHEN EXTRACT(YEAR FROM b.publication_date) > 2025
+                          THEN b.publication_date - INTERVAL '543 years'
+                          ELSE b.publication_date
+                      END
+                  ) >= CURRENT_DATE - INTERVAL %s
+            """, (interval_period,))
             total_books = cursor.fetchone()['count']
+            
             return {'books': books, 'total_books': total_books}
     except Exception as e:
         print("Railway trending query error:", e)
