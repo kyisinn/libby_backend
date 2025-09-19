@@ -4,12 +4,73 @@ from libby_backend.recommendation_system import BookRecommendationEngine, Recomm
 from ...extensions import cache
 import logging
 
+#recommendations page
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from clerk_backend_api import Clerk 
+
+
 # Initialize recommendation system
 recommendation_engine = BookRecommendationEngine()
 recommendation_api = RecommendationAPI(recommendation_engine)
 
 # Create blueprint
 rec_bp = Blueprint("recommendations", __name__, url_prefix="/api/recommendations")
+
+# Initialize Clerk client
+clerk = Clerk(api_key="YOUR_CLERK_SECRET_KEY")
+
+# DB config
+import os
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+def fetch_user_interests_from_db(user_id: str):
+    """Fetch user interests from user_interests table"""
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("""
+        SELECT genre 
+        FROM user_interests
+        WHERE user_id = %s
+    """, (user_id,))
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return [row["genre"] for row in rows]
+
+@rec_bp.route("/<user_id>/sync-interests", methods=["POST"])
+def sync_user_interests(user_id: str):
+    """Fetch user interests from DB and store them in Clerk metadata"""
+    try:
+        # Step 1: Fetch from DB
+        interests = fetch_user_interests_from_db(user_id)
+
+        # Step 2: Update Clerk metadata
+        clerk.users.update_user(user_id, {
+            "public_metadata": { "interests": interests }
+        })
+
+        return jsonify({
+            "success": True,
+            "user_id": user_id,
+            "interests": interests
+        })
+
+    except Exception as e:
+        logger.error(f"Error syncing interests for {user_id}: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to sync user interests"
+        }), 500
+    
+
+
+
+
+
+
+    
+
 
 logger = logging.getLogger(__name__)
 
