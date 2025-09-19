@@ -8,6 +8,7 @@ import logging
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from clerk_backend_api import Clerk 
+from libby_backend.database import get_books_by_genre_db
 
 
 # Initialize recommendation system
@@ -40,27 +41,42 @@ def fetch_user_interests_from_db(user_id: str):
 
 @rec_bp.route("/<user_id>/sync-interests", methods=["POST"])
 def sync_user_interests(user_id: str):
-    """Fetch user interests from DB and store them in Clerk metadata"""
     try:
-        # Step 1: Fetch from DB
+        # Step 1: Fetch interests from DB
         interests = fetch_user_interests_from_db(user_id)
 
         # Step 2: Update Clerk metadata
         clerk.users.update_user(user_id, {
-            "public_metadata": { "interests": interests }
+            "public_metadata": {"interests": interests}
         })
+
+        # Step 3: Fetch recommended books based on genres
+        recommended_books = []
+        for genre in interests:
+            genre_books = get_books_by_genre_db(genre, exclude_book_id=None, limit=5)
+            recommended_books.extend(genre_books)
+
+        # Deduplicate by book_id
+        seen = set()
+        unique_books = []
+        for book in recommended_books:
+            if book["id"] not in seen:
+                seen.add(book["id"])
+                unique_books.append(book)
 
         return jsonify({
             "success": True,
             "user_id": user_id,
-            "interests": interests
+            "interests": interests,
+            "books": unique_books[:10]  # limit total
         })
 
     except Exception as e:
-        logger.error(f"Error syncing interests for {user_id}: {e}")
+        logger.error(f"Error syncing interests + recommendations for {user_id}: {e}")
         return jsonify({
             "success": False,
-            "error": "Failed to sync user interests"
+            "error": "Failed to sync and fetch recommendations",
+            "books": []
         }), 500
     
 
@@ -69,7 +85,7 @@ def sync_user_interests(user_id: str):
 
 
 
-    
+
 
 
 logger = logging.getLogger(__name__)
