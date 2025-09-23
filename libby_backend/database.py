@@ -9,6 +9,7 @@ import psycopg2.errors
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+import traceback
 
 load_dotenv()
 
@@ -592,36 +593,31 @@ def get_content_based_recommendations_db(user_id: int, limit: int = 20):
             # Get user's preferred genres
             user_genres = get_user_genre_preferences_db(user_id)
             if not user_genres:
-                # Fallback to user_interests table
                 cur.execute("SELECT genre FROM user_interests WHERE user_id = %s", (user_id,))
                 user_interests = cur.fetchall()
-                if user_interests:
-                    genre_conditions = " OR ".join(["LOWER(b.genre) ILIKE %s" for _ in user_interests])
-                    genre_params = [f"%{genre[0].lower()}%" for genre in user_interests]
-                else:
-                    return []
-            else:
-                genre_conditions = " OR ".join(["LOWER(b.genre) ILIKE %s" for _ in user_genres])
-                genre_params = [f"%{genre[0].lower()}%" for genre in user_genres]
-            
-            # Get books user has already interacted with
+                user_genres = user_interests
+
+            if not user_genres:
+                return []
+
+            genre_conditions = " OR ".join(["LOWER(b.genre) ILIKE %s" for _ in user_genres])
+            genre_params = [
+                f"%{(genre['genre'] if isinstance(genre, dict) and 'genre' in genre else genre[0]).lower()}%"
+                for genre in user_genres
+            ]
+            # Books user already interacted with
             try:
-                cur.execute("""
-                    SELECT book_id FROM user_interactions 
-                    WHERE user_id = %s
-                """, (user_id,))
-                interacted_books = [row[0] for row in cur.fetchall()]
+                cur.execute("SELECT book_id FROM user_interactions WHERE user_id = %s", (user_id,))
+                interacted_books = [row["book_id"] for row in cur.fetchall()]
             except psycopg2.errors.UndefinedTable:
-                # Table doesn't exist yet, no books to exclude
                 interacted_books = []
-            
+
             exclude_clause = ""
             if interacted_books:
-                exclude_clause = f"AND b.book_id NOT IN ({','.join(map(str, interacted_books))})"
-            
-            # Get recommendations based on preferred genres
+                exclude_clause = "AND b.book_id <> ALL(%s)"
+
             query = f"""
-                SELECT b.book_id AS id, b.title, b.author, b.genre, 
+                SELECT b.book_id AS id, b.title, b.author, b.genre,
                        b.cover_image_url AS coverurl, b.rating
                 FROM books b
                 WHERE ({genre_conditions})
@@ -631,11 +627,11 @@ def get_content_based_recommendations_db(user_id: int, limit: int = 20):
                 ORDER BY b.rating DESC NULLS LAST, b.book_id
                 LIMIT %s
             """
-            
-            params = genre_params + [limit]
+
+            params = genre_params + ([interacted_books] if interacted_books else []) + [limit]
             cur.execute(query, params)
             return cur.fetchall()
-            
+
     except Exception as e:
         print("get_content_based_recommendations_db error:", e)
         return []

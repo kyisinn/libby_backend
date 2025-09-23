@@ -188,17 +188,17 @@ def get_books_by_advanced_genre_search_enhanced(target_genre: str, limit: int = 
             for row in rows:
                 try:
                     book = Book(
-                        id=row[0],
-                        title=row[1] or '',
-                        author=row[2] or 'Unknown Author',
-                        genre=row[3],
-                        description=row[4],
-                        cover_image_url=row[5],
-                        rating=safe_float_conversion(row[6]),
-                        publication_date=str(row[7]) if row[7] else None,
-                        pages=row[8],
-                        language=row[9],
-                        isbn=row[10]
+                        id=row["book_id"],
+                        title=row["title"] or '',
+                        author=row["author"] or 'Unknown Author',
+                        genre=row["genre"],
+                        description=row["description"],
+                        cover_image_url=row["cover_image_url"],
+                        rating=safe_float_conversion(row["rating"]),
+                        publication_date=str(row["publication_date"]) if row["publication_date"] else None,
+                        pages=row["pages"],
+                        language=row["language"],
+                        isbn=row["isbn"]
                     )
                     books.append(book)
                 except Exception as e:
@@ -1087,7 +1087,7 @@ class EnhancedBookRecommendationEngine:
                 books_per_genre = max(1, limit // len(selected_genres))
                 
                 for genre in selected_genres:
-                    genre_books = self._fetch_books_by_genre(genre, books_per_genre * 2, exclude_ids)
+                    genre_books = self.get_books_by_author(genre, books_per_genre * 2, exclude_ids)
                     
                     # Prefer highly rated books for diversity recommendations
                     genre_books.sort(key=lambda x: x.rating or 0, reverse=True)
@@ -2025,7 +2025,7 @@ def recommend_books_for_user(user_id, limit=20):
 
     # Get user genres
     cur.execute("SELECT genre FROM user_interests WHERE user_id = %s", (user_id,))
-    genres = [row[0].lower() for row in cur.fetchall()]
+    genres = [row["genre"].lower() for row in cur.fetchall()]
     print("🔍 User genres:", genres)
 
     if not genres:
@@ -2551,11 +2551,3 @@ class RecommendationAPI:
                 'success': False,
                 'error': str(e)
             }
-
-# Production-ready recommendation system - remove test functions for production use
-
-if __name__ == "__main__":
-    # Production-ready recommendation system
-    print("Book Recommendation System - Production Ready")
-    print("Use the recommendation routes in your Flask app to serve real user recommendations.")
-    print("No test data or test users - system ready for actual production use.")
