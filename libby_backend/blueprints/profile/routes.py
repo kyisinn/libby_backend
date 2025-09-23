@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from flask_cors import cross_origin
-from libby_backend.database import get_db_connection
+from libby_backend.database import get_db_connection, save_user_interests_db
 import hashlib
 
 # Register blueprint with URL prefix
@@ -44,37 +44,13 @@ def save_interests():
     user_id_int = resolve_user_id(clerk_user_id)
     print(f"🔗 Converted {clerk_user_id} -> {user_id_int}")
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    print("✅ Connected to DB, clearing old interests...")
-
-    # Create/update table to use INTEGER for user_id (matches user_interactions)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_interests (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            genre TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-
-    # Clear existing interests for this user
-    cursor.execute("DELETE FROM user_interests WHERE user_id = %s;", (user_id_int,))
-
-    # Insert new interests with integer user_id
-    for genre in interests:
-        print("   ➤ Inserting genre:", genre)
-        cursor.execute("""
-            INSERT INTO user_interests (user_id, genre)
-            VALUES (%s, %s);
-        """, (user_id_int, genre))
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    print("✅ Interests saved successfully")
-    return jsonify({"message": "Interests saved"}), 200
+    success = save_user_interests_db(user_id_int, interests)
+    if success:
+        print("✅ Interests saved successfully")
+        return jsonify({"success": True, "interests": interests}), 200
+    else:
+        print("❌ DB error saving interests")
+        return jsonify({"error": "DB error saving interests"}), 500
 
 # ───────────────────────────────────────────────────────────────
 # GET /api/profile/interests → fetch user interests

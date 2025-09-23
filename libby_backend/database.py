@@ -700,7 +700,50 @@ def initialize_recommendation_tables():
         print("❌ Failed to create user_interactions table")
     return success
 
+
 # Add this function to handle the interaction recording from frontend
 def record_book_click(user_id: int, book_id: int, interaction_type: str = "click"):
     """Record when user clicks on a book"""
     return record_user_interaction_db(user_id, book_id, interaction_type)
+
+
+# -----------------------------------------------------------------------------
+# USER INTERESTS
+# -----------------------------------------------------------------------------
+def save_user_interests_db(user_id: int, clerk_user_id: str, interests: list[str]):
+    """
+    Save a user's interests to the user_interests table.
+    Ensures the user_interests table exists, deletes old interests, and inserts new ones.
+    Returns True on success, False on error.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            # Ensure user_interests table exists with the required columns
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_interests (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    clerk_user_id TEXT NOT NULL,
+                    genre VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            # Delete previous interests for this user (by user_id)
+            cur.execute("DELETE FROM user_interests WHERE user_id = %s;", (user_id,))
+            # Insert new interests (user_id, clerk_user_id, genre)
+            for genre in interests:
+                cur.execute(
+                    "INSERT INTO user_interests (user_id, clerk_user_id, genre) VALUES (%s, %s, %s);",
+                    (user_id, clerk_user_id, genre)
+                )
+            conn.commit()
+            return True
+    except Exception as e:
+        print("save_user_interests_db error:", e)
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
