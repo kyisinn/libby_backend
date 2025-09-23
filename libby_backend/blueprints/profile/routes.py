@@ -44,7 +44,7 @@ def save_interests():
     user_id_int = resolve_user_id(clerk_user_id)
     print(f"🔗 Converted {clerk_user_id} -> {user_id_int}")
 
-    success = save_user_interests_db(user_id_int, interests)
+    success = save_user_interests_db(user_id_int, clerk_user_id, interests)
     if success:
         print("✅ Interests saved successfully")
         return jsonify({"success": True, "interests": interests}), 200
