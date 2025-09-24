@@ -20,6 +20,13 @@ from libby_backend.database import (
     get_db_connection, search_books_db, get_trending_books_db, 
     get_books_by_major_db, get_book_by_id_db, get_books_by_genre_db
 )
+from libby_backend.database import (
+    record_user_interaction_db,
+    collaborative_filtering_recommendations_pg,
+    count_user_interactions,
+    count_user_interests,
+)
+from psycopg2.extras import RealDictCursor
 
 def safe_float_conversion(value):
     """
@@ -144,6 +151,9 @@ class RecommendationResult:
     confidence_score: float
     reasons: List[str]
     generated_at: datetime
+    # Optional telemetry / diagnostics
+    contributions: Optional[Dict[str, int]] = None
+    interaction_count: Optional[int] = 0
 
 # Enhanced utility functions for better functionality
 def get_books_by_advanced_genre_search_enhanced(target_genre: str, limit: int = 20, exclude_ids: List[int] = None) -> List[Book]:
@@ -151,26 +161,26 @@ def get_books_by_advanced_genre_search_enhanced(target_genre: str, limit: int = 
     try:
         if exclude_ids is None:
             exclude_ids = []
-            
+
         conn = get_db_connection()
         if not conn:
             logger.error("No database connection available")
             return []
-            
+
         books = []
-        
+
         with conn.cursor() as cursor:
-            # Simple genre search with ILIKE for PostgreSQL
+            # Use correct column name: book_id instead of id
             exclude_clause = ""
             params = [f'%{target_genre}%']
-            
+
             if exclude_ids:
                 placeholders = ','.join(['%s'] * len(exclude_ids))
                 exclude_clause = f"AND book_id NOT IN ({placeholders})"
                 params.extend(exclude_ids)
-            
+
             params.append(limit)
-            
+
             query = f"""
                 SELECT book_id, title, author, genre, description, cover_image_url, 
                        rating, publication_date, pages, language, isbn
@@ -181,34 +191,34 @@ def get_books_by_advanced_genre_search_enhanced(target_genre: str, limit: int = 
                 ORDER BY rating DESC NULLS LAST, book_id
                 LIMIT %s
             """
-            
+
             cursor.execute(query, params)
             rows = cursor.fetchall()
-            
+
             for row in rows:
                 try:
                     book = Book(
-                        id=row["book_id"],
-                        title=row["title"] or '',
-                        author=row["author"] or 'Unknown Author',
-                        genre=row["genre"],
-                        description=row["description"],
-                        cover_image_url=row["cover_image_url"],
-                        rating=safe_float_conversion(row["rating"]),
-                        publication_date=str(row["publication_date"]) if row["publication_date"] else None,
-                        pages=row["pages"],
-                        language=row["language"],
-                        isbn=row["isbn"]
+                        id=row[0],  # book_id is first column
+                        title=row[1] or '',
+                        author=row[2] or 'Unknown Author',
+                        genre=row[3],
+                        description=row[4],
+                        cover_image_url=row[5],
+                        rating=safe_float_conversion(row[6]),
+                        publication_date=str(row[7]) if row[7] else None,
+                        pages=row[8],
+                        language=row[9],
+                        isbn=row[10]
                     )
                     books.append(book)
                 except Exception as e:
                     logger.error(f"Error creating book object: {e}")
                     continue
-                    
+
         conn.close()
         logger.info(f"Advanced genre search for '{target_genre}' returned {len(books)} books")
         return books
-                
+
     except Exception as e:
         logger.error(f"Error in advanced genre search for '{target_genre}': {e}")
         return []
@@ -301,6 +311,10 @@ def get_diversity_books_enhanced(profile, limit: int, exclude_ids: List[int]) ->
             logger.warning("No genres found in database")
             return []
         
+        # Ensure exclude_ids is a list
+        if exclude_ids is None:
+            exclude_ids = []
+
         # Find unexplored genres
         user_genres_lower = {genre.lower() for genre in (profile.selected_genres or [])}
         interaction_genres = set(profile.interaction_weights.keys() if profile.interaction_weights else [])
@@ -323,8 +337,8 @@ def get_diversity_books_enhanced(profile, limit: int, exclude_ids: List[int]) ->
             return []
         
         diversity_books = []
-        books_per_genre = max(1, limit // len(selected_genres))  # This is now safe
-        
+        books_per_genre = max(1, limit // max(1, len(selected_genres)))  # This is now safe
+
         for genre in selected_genres:
             genre_books = get_books_by_advanced_genre_search_enhanced(genre, books_per_genre, exclude_ids)
             for book in genre_books:
@@ -484,54 +498,81 @@ class EnhancedBookRecommendationEngine:
             return []
     
     def get_books_by_advanced_genre_search(self, target_genre: str, limit: int = 20, exclude_ids: List[int] = None) -> List[Book]:
-        """Advanced genre search using synonyms and partial matching"""
+        """Advanced genre search using synonyms and partial matching (DB-safe)."""
         try:
             if exclude_ids is None:
                 exclude_ids = []
-                
+
             # Get synonyms for the target genre
             search_terms = [target_genre.lower()]
             for main_genre, synonyms in self.genre_synonyms.items():
                 if target_genre.lower() in main_genre or main_genre in target_genre.lower():
                     search_terms.extend(synonyms)
-                    
+
             conn = get_db_connection()
             if not conn:
+                logger.error("No database connection available for advanced genre search")
                 return []
-                
-            books = []
+
+            books: List[Book] = []
             with conn.cursor() as cursor:
                 for term in set(search_terms):
                     exclude_clause = ""
+                    params = [f"%{term}%"]
+
                     if exclude_ids:
-                        exclude_clause = f"AND id NOT IN ({','.join(map(str, exclude_ids))})"
-                    
-                    cursor.execute(f'''
+                        placeholders = ','.join(['%s'] * len(exclude_ids))
+                        exclude_clause = f"AND book_id NOT IN ({placeholders})"
+                        params.extend(exclude_ids)
+
+                    params.append(limit)
+
+                    query = f"""
                         SELECT book_id, title, author, genre, description, cover_image_url, 
                                rating, publication_date, pages, language, isbn
                         FROM books 
                         WHERE LOWER(genre) LIKE %s {exclude_clause}
-                        ORDER BY rating DESC NULLS LAST
+                        AND title IS NOT NULL
+                        AND author IS NOT NULL
+                        ORDER BY rating DESC NULLS LAST, book_id
                         LIMIT %s
-                    ''', (f'%{term}%', limit))
-                    
-                    for row in cursor.fetchall():
-                        if row[0] not in exclude_ids:
+                    """
+
+                    cursor.execute(query, params)
+                    rows = cursor.fetchall()
+
+                    for row in rows:
+                        try:
+                            book_id = row[0]
+                            if book_id in (exclude_ids or []):
+                                continue
+
                             book = Book(
-                                id=row[0], title=row[1], author=row[2], genre=row[3],
-                                description=row[4], cover_image_url=row[5], rating=row[6],
+                                id=book_id,
+                                title=row[1] or '',
+                                author=row[2] or 'Unknown Author',
+                                genre=row[3],
+                                description=row[4],
+                                cover_image_url=row[5],
+                                rating=safe_float_conversion(row[6]),
                                 publication_date=str(row[7]) if row[7] else None,
-                                pages=row[8], language=row[9], isbn=row[10]
+                                pages=row[8],
+                                language=row[9],
+                                isbn=row[10]
                             )
                             books.append(book)
-                            exclude_ids.append(row[0])
-                            
+                            exclude_ids.append(book_id)
+                        except Exception as e:
+                            logger.error(f"Error creating book object in advanced genre search: {e}")
+                            continue
+
                     if len(books) >= limit:
                         break
-                        
+
             conn.close()
+            logger.info(f"Advanced genre search for '{target_genre}' returned {len(books)} books")
             return books[:limit]
-                
+
         except Exception as e:
             logger.error(f"Error in advanced genre search: {e}")
             return []
@@ -598,6 +639,28 @@ class EnhancedBookRecommendationEngine:
             
         except Exception as e:
             logger.error(f"Error recording enhanced interaction: {e}")
+
+    def record_interaction(self, user_id: Optional[int], book_id: int, interaction_type: str, rating: float = None, clerk_user_id: Optional[str] = None) -> Dict:
+        """
+        API shim: write interaction to Postgres via `record_user_interaction_db`.
+        Accepts either numeric `user_id` or `clerk_user_id` and returns a simple dict.
+        """
+        try:
+            saved = record_user_interaction_db(
+                user_id=user_id,
+                clerk_user_id=clerk_user_id,
+                book_id=book_id,
+                interaction_type=interaction_type,
+                rating=rating
+            )
+            ok = saved is not None
+            return {
+                "success": ok,
+                "message": f"{'Saved' if ok else 'Failed to save'} interaction",
+                "record": saved
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
     
     def _update_user_preferences(self, user_id: str, book_id: int, interaction_type: str, weight: float):
         """Update user preferences based on interactions"""
@@ -827,6 +890,24 @@ class EnhancedBookRecommendationEngine:
             logger.error(f"Error fetching books for genre {genre}: {e}")
             
         return []
+
+    def _make_book_from_row(self, row: Dict) -> Optional[Book]:
+        """Convert a dict-like DB row into a Book object."""
+        try:
+            book_id = row.get('id') or row.get('book_id') or row.get('bookid')
+            if not book_id:
+                return None
+            return Book(
+                id=book_id,
+                title=row.get('title') or '',
+                author=row.get('author') or 'Unknown Author',
+                genre=row.get('genre'),
+                cover_image_url=row.get('coverurl') or row.get('cover_image_url'),
+                rating=safe_float_conversion(row.get('rating'))
+            )
+        except Exception as e:
+            logger.debug(f"_make_book_from_row error: {e}")
+            return None
     
     def _fetch_trending_books(self, limit: int = 20, exclude_ids: List[int] = None) -> List[Book]:
         """Fetch trending books using existing database functions"""
@@ -1001,63 +1082,51 @@ class EnhancedBookRecommendationEngine:
         return min(score, 1.0)
     
     def collaborative_filtering_recommendations(self, profile: UserProfile, limit: int = 10) -> Tuple[List[Book], List[str]]:
-        """Generate recommendations based on similar users"""
-        recommendations = []
-        reasons = []
-        
+        """Generate collaborative filtering recommendations using the existing PostgreSQL function."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Find users with similar interactions
-            cursor.execute('''
-                SELECT ui2.user_id, COUNT(*) as common_books,
-                       GROUP_CONCAT(ui2.book_id) as their_books
-                FROM user_interactions ui1
-                JOIN user_interactions ui2 ON ui1.book_id = ui2.book_id 
-                    AND ui1.user_id != ui2.user_id
-                WHERE ui1.user_id = ? AND ui1.interaction_type IN ('view', 'wishlist')
-                    AND ui2.interaction_type IN ('view', 'wishlist')
-                GROUP BY ui2.user_id
-                HAVING common_books >= 2
-                ORDER BY common_books DESC
-                LIMIT 10
-            ''', (profile.user_id,))
-            
-            similar_users = cursor.fetchall()
-            
-            if similar_users:
-                # Get books liked by similar users that current user hasn't seen
-                recommended_book_ids = Counter()
-                
-                for similar_user_id, common_books, their_books in similar_users:
-                    their_book_ids = [int(book_id) for book_id in their_books.split(',')]
-                    
-                    # Weight recommendations by similarity (number of common books)
-                    similarity_weight = min(common_books / 5.0, 1.0)
-                    
-                    for book_id in their_book_ids:
-                        if book_id not in profile.reading_history and book_id not in profile.wishlist:
-                            recommended_book_ids[book_id] += similarity_weight
-                
-                # Get top recommended books from main database
-                top_book_ids = [book_id for book_id, _ in recommended_book_ids.most_common(limit * 2)]
-                
-                for book_id in top_book_ids:
-                    book = self._get_book_from_main_db(book_id)
-                    if book:
-                        book.collaborative_score = recommended_book_ids[book_id]
-                        recommendations.append(book)
-                
-                recommendations = recommendations[:limit]
-                reasons.append("Users with similar reading preferences also enjoyed these books")
-            
-            conn.close()
-            
+            clerk_user_id = getattr(profile, 'clerk_user_id', None)
+            user_id = None
+
+            # Try to get numeric user_id from profile
+            try:
+                user_id = int(profile.user_id) if profile.user_id and str(profile.user_id).isdigit() else None
+            except (ValueError, TypeError):
+                user_id = None
+
+            # Call the existing PostgreSQL helper which returns (rows, reasons)
+            rows, reasons = collaborative_filtering_recommendations_pg(
+                clerk_user_id=clerk_user_id,
+                user_id=user_id,
+                limit=limit
+            )
+
+            # Convert rows to Book objects
+            books: List[Book] = []
+            for row in (rows or []):
+                try:
+                    book = Book(
+                        id=row.get('book_id') or row.get('id'),
+                        title=row.get('title', '') or '',
+                        author=row.get('author', 'Unknown Author') or 'Unknown Author',
+                        genre=row.get('genre'),
+                        cover_image_url=row.get('cover_image_url') or row.get('coverurl'),
+                        rating=safe_float_conversion(row.get('rating'))
+                    )
+                    # preserve score if present
+                    try:
+                        book.collaborative_score = row.get('score')
+                    except Exception:
+                        pass
+                    books.append(book)
+                except Exception as e:
+                    logger.error(f"Error creating book from collaborative row: {e}")
+                    continue
+
+            return books, reasons or []
+
         except Exception as e:
             logger.error(f"Error in collaborative filtering: {e}")
-        
-        return recommendations, reasons
+            return [], []
     
     def diversity_recommendations(self, profile: UserProfile, limit: int = 5) -> Tuple[List[Book], List[str]]:
         """Add diversity by recommending books from genres user hasn't explored"""
@@ -1158,109 +1227,91 @@ class EnhancedBookRecommendationEngine:
         try:
             all_recommendations = []
             all_reasons = []
-            algorithm_contributions = {}
-            
-            # 1. Content-based recommendations (35%)
+            contributions = {}
+
+            # ---------- content (35%)
             content_limit = int(total_limit * self.weights['content_based'])
             content_books, content_reasons = self.content_based_recommendations_enhanced(profile, content_limit)
-            all_recommendations.extend(content_books)
-            all_reasons.extend(content_reasons)
-            algorithm_contributions['content_based'] = len(content_books)
-            
-            # 2. Author-based recommendations (15%)
+            all_recommendations.extend(content_books); all_reasons += content_reasons
+            contributions['content'] = len(content_books)
+
+            # ---------- author (15%)
             author_limit = int(total_limit * self.weights['author_based'])
             author_books, author_reasons = self.author_based_recommendations(profile, author_limit)
-            # Remove duplicates
-            author_books = [book for book in author_books 
-                          if book.id not in {b.id for b in all_recommendations}]
-            all_recommendations.extend(author_books)
-            all_reasons.extend(author_reasons)
-            algorithm_contributions['author_based'] = len(author_books)
-            
-            # 3. Collaborative filtering (25%)
+            author_books = [b for b in author_books if b.id not in {x.id for x in all_recommendations}]
+            all_recommendations.extend(author_books); all_reasons += author_reasons
+            contributions['author'] = len(author_books)
+
+            # ---------- collaborative (25%)
             collab_limit = int(total_limit * self.weights['collaborative'])
             collab_books, collab_reasons = self.collaborative_filtering_recommendations(profile, collab_limit)
-            # Remove duplicates
-            collab_books = [book for book in collab_books 
-                          if book.id not in {b.id for b in all_recommendations}]
-            all_recommendations.extend(collab_books)
-            all_reasons.extend(collab_reasons)
-            algorithm_contributions['collaborative'] = len(collab_books)
-            
-            # 4. High-quality trending books (20%)
+            collab_books = [b for b in collab_books if b.id not in {x.id for x in all_recommendations}]
+            all_recommendations.extend(collab_books); all_reasons += collab_reasons
+            contributions['collab'] = len(collab_books)
+
+            # ---------- trending (20%)
             trending_limit = int(total_limit * self.weights['trending'])
-            exclude_ids = [b.id for b in all_recommendations] + profile.reading_history + profile.wishlist
+            exclude_ids = [b.id for b in all_recommendations] + (profile.reading_history or []) + (profile.wishlist or [])
             trending_books = self.get_quality_trending_books(trending_limit, exclude_ids, profile)
             all_recommendations.extend(trending_books)
-            if trending_books:
-                all_reasons.append("High-rated trending books matching your preferences")
-            algorithm_contributions['trending'] = len(trending_books)
-            
-            # 5. Diversity injection (5%)
+            if trending_books: all_reasons.append("High-rated trending books matching your preferences")
+            contributions['trending'] = len(trending_books)
+
+            # ---------- diversity (5%)
             diversity_limit = int(total_limit * self.weights['diversity'])
-            diversity_books = self.get_diversity_books(profile, diversity_limit, 
-                                                    [b.id for b in all_recommendations])
+            diversity_books = self.get_diversity_books(profile, diversity_limit, [b.id for b in all_recommendations])
             all_recommendations.extend(diversity_books)
-            if diversity_books:
-                all_reasons.append("Diverse books from unexplored genres")
-            algorithm_contributions['diversity'] = len(diversity_books)
-            
-            # Calculate overall confidence score
-            confidence = self._calculate_enhanced_confidence(profile, algorithm_contributions, total_limit)
-            
-            # Remove duplicates and sort by score
-            seen_ids = set()
-            final_recommendations = []
-            for book in sorted(all_recommendations, key=lambda x: getattr(x, 'similarity_score', 0), reverse=True):
-                if book.id not in seen_ids:
-                    final_recommendations.append(book)
-                    seen_ids.add(book.id)
-            
-            # Ensure minimum quality threshold
-            quality_recommendations = [book for book in final_recommendations 
-                                     if not book.rating or book.rating >= profile.preferred_rating_threshold]
-            
-            # If we don't have enough high-quality recommendations, add more trending
-            if len(quality_recommendations) < total_limit * 0.6:
-                additional_trending = self.get_quality_trending_books(
-                    total_limit - len(quality_recommendations), 
-                    [b.id for b in quality_recommendations], 
-                    profile
-                )
-                quality_recommendations.extend(additional_trending)
-            
-            final_recommendations = quality_recommendations[:total_limit]
-            
-            # Determine primary algorithm used
-            if algorithm_contributions:
-                primary_algorithm = max(algorithm_contributions.items(), key=lambda x: x[1])[0]
+            if diversity_books: all_reasons.append("Diverse books from unexplored genres")
+            contributions['diversity'] = len(diversity_books)
+
+            # ---------- dedupe + quality
+            seen = set(); final = []
+            for b in sorted(all_recommendations, key=lambda x: getattr(x, 'similarity_score', 0), reverse=True):
+                if b.id not in seen:
+                    final.append(b); seen.add(b.id)
+
+            quality = [b for b in final if (getattr(b, 'rating', None) is None) or (b.rating >= profile.preferred_rating_threshold)]
+            if len(quality) < total_limit * 0.6:
+                extra = self.get_quality_trending_books(total_limit - len(quality), [x.id for x in quality], profile)
+                quality.extend(extra)
+
+            final = quality[:total_limit]
+
+            # ---------- label & confidence (use DB counts)
+            i_count = count_user_interactions(getattr(profile, 'clerk_user_id', '') or "")
+            u_count = count_user_interests(getattr(profile, 'clerk_user_id', '') or "")
+            confidence = self._calculate_enhanced_confidence(profile, contributions, total_limit)
+
+            if i_count > 0 or u_count > 0:
+                algo_label = "Database Hybrid (Collaborative + Content + Trending)"
             else:
-                primary_algorithm = "fallback"
-            
-            result = RecommendationResult(
-                books=final_recommendations,
-                algorithm_used=f"Enhanced Hybrid ({primary_algorithm.replace('_', ' ').title()} primary)",
+                algo_label = "Trending (New User)"
+
+            # Primary for telemetry
+            primary = max(contributions.items(), key=lambda x: x[1])[0] if contributions else "trending"
+
+            return RecommendationResult(
+                books=final,
+                algorithm_used=algo_label,
                 confidence_score=confidence,
                 reasons=list(set(all_reasons)),
-                generated_at=datetime.now()
+                generated_at=datetime.now(),
+                # add these two fields to your dataclass if not present; else return them alongside in the route
+                contributions=contributions,
+                interaction_count=i_count,
             )
-            
-            logger.info(f"Generated {len(final_recommendations)} enhanced recommendations for {profile.user_id}")
-            logger.info(f"Algorithm contributions: {algorithm_contributions}")
-            
-            return result
-            
+
         except Exception as e:
             logger.error(f"Error in enhanced hybrid recommendations: {e}")
-            
-            # Fallback to high-quality trending books
-            trending_books = self.get_quality_trending_books(total_limit, [], profile)
+            trending = self.get_quality_trending_books(total_limit, [], profile)
             return RecommendationResult(
-                books=trending_books,
+                books=trending,
                 algorithm_used="Fallback (Quality Trending)",
                 confidence_score=0.6,
                 reasons=["High-quality trending books as fallback"],
-                generated_at=datetime.now()
+                generated_at=datetime.now(),
+                contributions={"trending": len(trending)},
+                interaction_count=count_user_interactions(getattr(profile, 'clerk_user_id', '') or ""),
             )
     
     def content_based_recommendations_enhanced(self, profile: UserProfile, limit: int = 15) -> Tuple[List[Book], List[str]]:
@@ -1408,6 +1459,11 @@ class EnhancedBookRecommendationEngine:
     def get_diversity_books(self, profile: UserProfile, limit: int, exclude_ids: List[int]) -> List[Book]:
         """Get diverse books from unexplored genres"""
         try:
+        
+            # Ensure exclude_ids is a list
+            if exclude_ids is None:
+                exclude_ids = []
+
             # Get available genres from a sample of books
             sample_books = self.get_all_books_with_metadata(200)
             available_genres = list(set([book.genre.lower() for book in sample_books if book.genre]))
@@ -1430,7 +1486,8 @@ class EnhancedBookRecommendationEngine:
             selected_genres = random.sample(unexplored_genres, min(3, len(unexplored_genres)))
             
             diversity_books = []
-            books_per_genre = max(1, limit // len(selected_genres))
+            # Prevent division by zero when selected_genres is empty
+            books_per_genre = max(1, limit // max(1, len(selected_genres)))
             
             for genre in selected_genres:
                 genre_books = self.get_books_by_advanced_genre_search(genre, books_per_genre, exclude_ids)
@@ -1577,12 +1634,31 @@ class EnhancedBookRecommendationEngine:
             all_reasons.extend(content_reasons)
             algorithm_contributions['content_based'] = len(content_books)
             
-            # 2. Collaborative filtering (30%)
+            # 2. Collaborative filtering (Postgres)
             collab_limit = int(total_limit * self.weights['collaborative'])
-            collab_books, collab_reasons = self.collaborative_filtering_recommendations(profile, collab_limit)
-            # Remove duplicates
-            collab_books = [book for book in collab_books 
-                          if book.id not in {b.id for b in all_recommendations}]
+            # Accept both clerk_user_id and numeric user_id from profile
+            clerk_id = getattr(profile, 'clerk_user_id', None)
+            numeric_id = None
+            try:
+                # profile.user_id may be string; try to convert
+                numeric_id = int(profile.user_id) if isinstance(profile.user_id, (int, str)) and str(profile.user_id).isdigit() else None
+            except Exception:
+                numeric_id = None
+
+            collab_rows, collab_reasons = collaborative_filtering_recommendations_pg(
+                clerk_user_id=clerk_id,
+                user_id=numeric_id,
+                limit=collab_limit
+            )
+            # Convert DB rows to Book objects and dedupe against existing recommendations
+            collab_books = []
+            existing_ids = {b.id for b in all_recommendations}
+            for r in collab_rows:
+                b = self._make_book_from_row(r)
+                if b and b.id not in existing_ids:
+                    collab_books.append(b)
+                    existing_ids.add(b.id)
+
             all_recommendations.extend(collab_books)
             all_reasons.extend(collab_reasons)
             algorithm_contributions['collaborative'] = len(collab_books)

@@ -1,11 +1,16 @@
 from flask import Blueprint, request, jsonify
-from flask_cors import cross_origin
+from flask_cors import cross_origin, CORS
 from libby_backend.database import get_db_connection, save_user_interests_db
 import hashlib
 
 # Register blueprint with URL prefix
 profile_bp = Blueprint("profile", __name__, url_prefix="/api/profile")
 print("✅ profile.routes.py is loading...")  # Confirm it's imported
+
+# Apply per-blueprint CORS so we don't need to decorate every route manually
+CORS(profile_bp, origins=["http://localhost:3000", "http://127.0.0.1:3000", "https://libby-bot.vercel.app"],
+    supports_credentials=True, methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"]) 
 
 from flask import Blueprint, request, jsonify
 import logging

@@ -10,8 +10,13 @@ from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 import traceback
+from typing import Optional, List
+from libby_backend.utils.user_resolver import resolve_user_id
+import logging
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # SQLAlchemy engine for recommendation system
 engine = create_engine(
@@ -49,6 +54,7 @@ def create_user_interactions_table():
             cur.execute("""
                 CREATE TABLE user_interactions (
                     id SERIAL PRIMARY KEY,
+                    clerk_user_id TEXT,
                     user_id INTEGER NOT NULL,
                     book_id INTEGER NOT NULL,
                     interaction_type VARCHAR(50) NOT NULL DEFAULT 'view',
@@ -416,50 +422,57 @@ def get_book_by_id_db(book_id):
 #     finally:
 #         conn.close()
 
-def record_user_interaction_db(user_id: int, book_id: int, interaction_type: str = "view", rating: float = None):
-    """Enhanced user interaction recording with more interaction types"""
+def _resolve_numeric_user_id(conn, user_id: Optional[int], clerk_user_id: Optional[str]) -> Optional[int]:
+    """Resolve a deterministic numeric user_id from either an integer or a clerk_user_id.
+
+    Prefer the provided numeric user_id. If missing, try `resolve_user_id` helper.
+    If that fails, attempt to look up an existing mapping in user_interactions.
+    """
+    if user_id:
+        return user_id
+    if clerk_user_id:
+        try:
+            # Prefer centralized resolver if available
+            return resolve_user_id(clerk_user_id)
+        except Exception:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT user_id FROM public.user_interactions WHERE clerk_user_id = %s LIMIT 1", (clerk_user_id,))
+                    row = cur.fetchone()
+                    if row and row.get('user_id'):
+                        return row['user_id']
+            except Exception:
+                pass
+    return None
+
+
+def record_user_interaction_db(
+    user_id: Optional[int],
+    book_id: int,
+    interaction_type: str = "view",
+    rating: float = None,
+    clerk_user_id: Optional[str] = None
+):
+    """
+    Record interaction into Postgres user_interactions.
+    Accepts either numeric user_id or clerk_user_id (or both).
+    """
     conn = get_db_connection()
     if not conn:
         return None
     try:
-        with conn.cursor() as cur:
-            # First, try to insert into the table
+        numeric_user_id = _resolve_numeric_user_id(conn, user_id, clerk_user_id)
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                INSERT INTO user_interactions (user_id, book_id, interaction_type, rating, timestamp)
-                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                RETURNING id, user_id, book_id, interaction_type, timestamp
-            """, (user_id, book_id, interaction_type, rating))
-            result = cur.fetchone()
+                INSERT INTO public.user_interactions 
+                    (user_id, clerk_user_id, book_id, interaction_type, rating, timestamp)
+                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                RETURNING id, user_id, clerk_user_id, book_id, interaction_type, rating, timestamp
+            """, (numeric_user_id, clerk_user_id, book_id, interaction_type, rating))
+            row = cur.fetchone()
             conn.commit()
-            return result
-    except psycopg2.errors.UndefinedTable:
-        # Table doesn't exist, create it
-        print("user_interactions table doesn't exist, creating it...")
-        conn.rollback()
-        conn.close()
-        
-        # Create the table
-        if create_user_interactions_table():
-            # Retry the insert
-            conn = get_db_connection()
-            if conn:
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            INSERT INTO user_interactions (user_id, book_id, interaction_type, rating, timestamp)
-                            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                            RETURNING id, user_id, book_id, interaction_type, timestamp
-                        """, (user_id, book_id, interaction_type, rating))
-                        result = cur.fetchone()
-                        conn.commit()
-                        return result
-                except Exception as e:
-                    print("record_user_interaction_db retry error:", e)
-                    conn.rollback()
-                    return None
-                finally:
-                    conn.close()
-        return None
+            return dict(row) if row else None
     except Exception as e:
         print("record_user_interaction_db error:", e)
         conn.rollback()
@@ -468,80 +481,207 @@ def record_user_interaction_db(user_id: int, book_id: int, interaction_type: str
         if conn and not conn.closed:
             conn.close()
 
-def get_user_interactions_db(user_id: int, limit: int = 100):
-    """Get user interaction history"""
+def get_user_interactions_db(user_id: Optional[int] = None,
+                             clerk_user_id: Optional[str] = None,
+                             limit: int = 100) -> List[dict]:
+    """Get user interaction history with book details (Postgres)."""
     conn = get_db_connection()
     if not conn:
         return []
+
     try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT ui.book_id, ui.interaction_type, ui.rating, ui.timestamp,
-                       b.title, b.author, b.genre, b.cover_image_url
-                FROM user_interactions ui
-                LEFT JOIN books b ON ui.book_id = b.book_id
-                WHERE ui.user_id = %s
-                ORDER BY ui.timestamp DESC
-                LIMIT %s
-            """, (user_id, limit))
+        where, params = [], []
+        if user_id is not None:
+            where.append("ui.user_id = %s")
+            params.append(int(user_id))
+        if clerk_user_id:
+            where.append("ui.clerk_user_id = %s")
+            params.append(str(clerk_user_id))
+
+        if not where:
+            return []  # avoid full scan
+
+        sql = f"""
+            SELECT ui.id, ui.user_id, ui.clerk_user_id, ui.book_id,
+                   ui.interaction_type, ui.rating, ui.timestamp,
+                   b.book_id, b.title, b.author, b.genre, b.cover_image_url
+            FROM public.user_interactions ui
+            LEFT JOIN public.books b ON b.book_id = ui.book_id
+            WHERE {' OR '.join(where)}
+            ORDER BY ui.timestamp DESC
+            LIMIT %s
+        """
+        params.append(int(limit))
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, params)
             return cur.fetchall()
-    except psycopg2.errors.UndefinedTable:
-        print("user_interactions table doesn't exist, creating it...")
-        create_user_interactions_table()
-        return []  # Return empty list for now
     except Exception as e:
         print("get_user_interactions_db error:", e)
         return []
     finally:
         conn.close()
 
-def get_collaborative_recommendations_db(user_id: int, limit: int = 20):
-    """Get collaborative filtering recommendations based on similar users"""
+# --- Collaborative filtering on Postgres ------------------
+
+def collaborative_filtering_recommendations_pg(clerk_user_id: Optional[str], user_id: Optional[int], limit: int = 10):
+    """
+    Recommend books liked/viewed by similar users (overlap >= 2),
+    weighting by interaction type and number of common books.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return [], []
+
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Use either numeric id or clerk id to identify "me"
+            # Positive interactions considered:
+            positives = ("view","like","wishlist_add","rate")
+
+            # CTEs:
+            # 1) my_books: books I've positively interacted with
+            # 2) sim: users who share >=2 of those books with me
+            # 3) rec: candidate books from similar users that I haven't interacted with,
+            #         scored by interaction weight * similarity factor
+            cur.execute(f"""
+                WITH my_books AS (
+                    SELECT DISTINCT ui.book_id
+                    FROM public.user_interactions ui
+                    WHERE (ui.user_id = %s OR ui.clerk_user_id = %s)
+                      AND ui.interaction_type = ANY(%s)
+                ),
+                sim AS (
+                    SELECT ui2.user_id, COUNT(*) AS common_books
+                    FROM public.user_interactions ui1
+                    JOIN public.user_interactions ui2
+                      ON ui1.book_id = ui2.book_id
+                     AND (ui1.user_id IS DISTINCT FROM ui2.user_id
+                          OR ui1.clerk_user_id IS DISTINCT FROM ui2.clerk_user_id)
+                    WHERE (ui1.user_id = %s OR ui1.clerk_user_id = %s)
+                      AND ui1.interaction_type = ANY(%s)
+                      AND ui2.interaction_type = ANY(%s)
+                    GROUP BY ui2.user_id
+                    HAVING COUNT(*) >= 2
+                ),
+                rec AS (
+                    SELECT 
+                        ui.book_id,
+                        SUM(
+                            CASE ui.interaction_type
+                              WHEN 'view' THEN 1.0
+                              WHEN 'like' THEN 2.0
+                              WHEN 'wishlist_add' THEN 3.0
+                              WHEN 'rate' THEN 1.5 + COALESCE(ui.rating,0)/10.0
+                              ELSE 0.5
+                            END
+                            * (1 + LEAST(s.common_books/5.0, 1.0))
+                        ) AS score
+                    FROM public.user_interactions ui
+                    JOIN sim s ON ui.user_id = s.user_id
+                    WHERE ui.book_id NOT IN (SELECT book_id FROM my_books)
+                    GROUP BY ui.book_id
+                )
+                SELECT b.book_id, b.title, b.author, b.genre, b.cover_image_url, r.score
+                FROM rec r
+                JOIN public.books b ON b.book_id = r.book_id
+                ORDER BY r.score DESC
+                LIMIT %s
+            """, (
+                user_id, clerk_user_id, list(positives),
+                user_id, clerk_user_id, list(positives), list(positives),
+                limit
+            ))
+            rows = cur.fetchall()
+
+        reasons = []
+        if rows:
+            reasons.append("Users with similar reading preferences also engaged with these books")
+        return rows, reasons
+
+    except Exception as e:
+        print("Error in collaborative_filtering_recommendations_pg:", e)
+        return [], []
+    finally:
+        conn.close()
+
+def get_collaborative_recommendations_db(user_id: Optional[int] = None, limit: int = 20, clerk_user_id: Optional[str] = None):
+    """Compatibility wrapper: return just rows like previous API."""
+    rows, _ = collaborative_filtering_recommendations_pg(clerk_user_id=clerk_user_id, user_id=user_id, limit=limit)
+    return rows
+
+def get_collaborative_recommendations_db(user_id: Optional[int] = None, limit: int = 20, clerk_user_id: Optional[str] = None):
+    """Get collaborative filtering recommendations based on similar users.
+
+    This implementation accepts either a numeric `user_id` or a `clerk_user_id` (or both).
+    It finds similar users who share at least two positively-interacted books and
+    scores candidate books by interaction weight and similarity.
+
+    Returns a list of recommendation rows (dict-like objects) to preserve backward compatibility.
+    """
     conn = get_db_connection()
     if not conn:
         return []
+
     try:
-        with conn.cursor() as cur:
-            # Find users with similar interaction patterns
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            positives = ("view", "like", "wishlist_add", "rate")
+
             cur.execute("""
-                WITH user_books AS (
-                    SELECT book_id 
-                    FROM user_interactions 
-                    WHERE user_id = %s 
-                    AND interaction_type IN ('click', 'view', 'wishlist_add')
+                WITH my_books AS (
+                    SELECT DISTINCT ui.book_id
+                    FROM public.user_interactions ui
+                    WHERE (ui.user_id = %s OR ui.clerk_user_id = %s)
+                      AND ui.interaction_type = ANY(%s)
                 ),
-                similar_users AS (
-                    SELECT ui2.user_id, COUNT(*) as common_books
-                    FROM user_interactions ui2
-                    WHERE ui2.book_id IN (SELECT book_id FROM user_books)
-                    AND ui2.user_id != %s
-                    AND ui2.interaction_type IN ('click', 'view', 'wishlist_add')
+                sim AS (
+                    SELECT ui2.user_id, COUNT(*) AS common_books
+                    FROM public.user_interactions ui1
+                    JOIN public.user_interactions ui2
+                      ON ui1.book_id = ui2.book_id
+                     AND (ui1.user_id IS DISTINCT FROM ui2.user_id
+                          OR ui1.clerk_user_id IS DISTINCT FROM ui2.clerk_user_id)
+                    WHERE (ui1.user_id = %s OR ui1.clerk_user_id = %s)
+                      AND ui1.interaction_type = ANY(%s)
+                      AND ui2.interaction_type = ANY(%s)
                     GROUP BY ui2.user_id
                     HAVING COUNT(*) >= 2
-                    ORDER BY common_books DESC
-                    LIMIT 10
                 ),
-                recommended_books AS (
-                    SELECT b.book_id, b.title, b.author, b.genre, b.cover_image_url, 
-                           b.rating, COUNT(*) as recommendation_score
-                    FROM user_interactions ui
-                    JOIN books b ON ui.book_id = b.book_id
-                    WHERE ui.user_id IN (SELECT user_id FROM similar_users)
-                    AND ui.book_id NOT IN (SELECT book_id FROM user_books)
-                    AND ui.interaction_type IN ('click', 'view', 'wishlist_add')
-                    AND b.rating >= 3.0
-                    GROUP BY b.book_id, b.title, b.author, b.genre, b.cover_image_url, b.rating
-                    ORDER BY recommendation_score DESC, b.rating DESC
-                    LIMIT %s
+                rec AS (
+                    SELECT 
+                        ui.book_id,
+                        SUM(
+                            CASE ui.interaction_type
+                              WHEN 'view' THEN 1.0
+                              WHEN 'like' THEN 2.0
+                              WHEN 'wishlist_add' THEN 3.0
+                              WHEN 'rate' THEN 1.5 + COALESCE(ui.rating,0)/10.0
+                              ELSE 0.5
+                            END
+                            * (1 + LEAST(s.common_books/5.0, 1.0))
+                        ) AS score
+                    FROM public.user_interactions ui
+                    JOIN sim s ON ui.user_id = s.user_id
+                    WHERE ui.book_id NOT IN (SELECT book_id FROM my_books)
+                    GROUP BY ui.book_id
                 )
-                SELECT book_id AS id, title, author, genre, cover_image_url AS coverurl, rating
-                FROM recommended_books
-            """, (user_id, user_id, limit))
-            return cur.fetchall()
-    except psycopg2.errors.UndefinedTable:
-        print("user_interactions table doesn't exist for collaborative filtering, creating it...")
-        create_user_interactions_table()
-        return []  # Return empty list for now
+                SELECT b.book_id AS id, b.title, b.author, b.genre, b.cover_image_url AS coverurl, r.score
+                FROM rec r
+                JOIN public.books b ON b.book_id = r.book_id
+                ORDER BY r.score DESC
+                LIMIT %s
+            """, (
+                user_id, clerk_user_id, list(positives),
+                user_id, clerk_user_id, list(positives), list(positives),
+                limit
+            ))
+
+            rows = cur.fetchall()
+
+        # Add a human-readable reason when results exist
+        # (compatibility: function returns only rows as before)
+        return rows
+
     except Exception as e:
         print("get_collaborative_recommendations_db error:", e)
         return []
@@ -583,6 +723,73 @@ def get_user_genre_preferences_db(user_id: int):
     finally:
         conn.close()
 
+
+# -----------------------------------------------------------------------------
+# Tiny helpers
+# -----------------------------------------------------------------------------
+def count_user_interactions(clerk_user_id: str) -> int:
+    """Return number of rows in user_interactions for a clerk_user_id."""
+    if not clerk_user_id:
+        return 0
+    conn = get_db_connection()
+    if not conn:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) as count
+                FROM public.user_interactions 
+                WHERE clerk_user_id = %s
+            """, (clerk_user_id,))
+            result = cur.fetchone()
+            # Handle both dict-like and tuple-like results
+            if result:
+                if hasattr(result, 'get'):
+                    return int(result.get('count', 0) or 0)
+                else:
+                    return int(result[0] or 0)
+            return 0
+    except Exception as e:
+        logger.error(f"Error counting user interactions: {e}")
+        return 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def count_user_interests(clerk_user_id: str) -> int:
+    """Return number of rows in user_interests for a clerk_user_id."""
+    if not clerk_user_id:
+        return 0
+    conn = get_db_connection()
+    if not conn:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) as count
+                FROM public.user_interests 
+                WHERE clerk_user_id = %s
+            """, (clerk_user_id,))
+            result = cur.fetchone()
+            # Handle both dict-like and tuple-like results
+            if result:
+                if hasattr(result, 'get'):  # dict-like (RealDictCursor)
+                    return int(result.get('count', 0) or 0)
+                else:  # tuple-like
+                    return int(result[0] or 0)
+            return 0
+    except Exception as e:
+        print(f"Error counting user interests: {e}")
+        return 0
+    finally:
+        try:
+            conn.close()
+        except:
+            pass
+
 def get_content_based_recommendations_db(user_id: int, limit: int = 20):
     """Get content-based recommendations using user's genre preferences"""
     conn = get_db_connection()
@@ -590,31 +797,49 @@ def get_content_based_recommendations_db(user_id: int, limit: int = 20):
         return []
     try:
         with conn.cursor() as cur:
-            # Get user's preferred genres
-            user_genres = get_user_genre_preferences_db(user_id)
-            if not user_genres:
+            # Get user's preferred genres from interactions
+            cur.execute("""
+                SELECT b.genre, COUNT(*) as interaction_count,
+                       AVG(CASE 
+                           WHEN ui.interaction_type = 'click' THEN 2
+                           WHEN ui.interaction_type = 'view' THEN 1  
+                           WHEN ui.interaction_type = 'wishlist_add' THEN 3
+                           ELSE 1 END) as preference_score
+                FROM user_interactions ui
+                JOIN books b ON ui.book_id = b.book_id
+                WHERE ui.user_id = %s 
+                AND b.genre IS NOT NULL
+                AND ui.interaction_type IN ('click', 'view', 'wishlist_add')
+                GROUP BY b.genre
+                HAVING COUNT(*) >= 1
+                ORDER BY preference_score DESC, interaction_count DESC
+                LIMIT 5
+            """, (user_id,))
+            
+            user_genre_prefs = cur.fetchall()
+            
+            # If no interaction-based preferences, try user_interests table
+            if not user_genre_prefs:
                 cur.execute("SELECT genre FROM user_interests WHERE user_id = %s", (user_id,))
                 user_interests = cur.fetchall()
-                user_genres = user_interests
+                if user_interests:
+                    # Convert to the expected format
+                    user_genre_prefs = [(row[0], 1, 1.0) for row in user_interests]
 
-            if not user_genres:
+            if not user_genre_prefs:
                 return []
 
-            genre_conditions = " OR ".join(["LOWER(b.genre) ILIKE %s" for _ in user_genres])
-            genre_params = [
-                f"%{(genre['genre'] if isinstance(genre, dict) and 'genre' in genre else genre[0]).lower()}%"
-                for genre in user_genres
-            ]
-            # Books user already interacted with
-            try:
-                cur.execute("SELECT book_id FROM user_interactions WHERE user_id = %s", (user_id,))
-                interacted_books = [row["book_id"] for row in cur.fetchall()]
-            except psycopg2.errors.UndefinedTable:
-                interacted_books = []
+            # Get books user already interacted with
+            cur.execute("SELECT book_id FROM user_interactions WHERE user_id = %s", (user_id,))
+            interacted_books = [row[0] for row in cur.fetchall()]
 
+            # Build genre conditions
+            genre_conditions = " OR ".join(["LOWER(b.genre) ILIKE %s" for _ in user_genre_prefs])
+            genre_params = [f"%{genre[0].lower()}%" for genre in user_genre_prefs]
+            
             exclude_clause = ""
             if interacted_books:
-                exclude_clause = "AND b.book_id <> ALL(%s)"
+                exclude_clause = f"AND b.book_id NOT IN ({','.join(map(str, interacted_books))})"
 
             query = f"""
                 SELECT b.book_id AS id, b.title, b.author, b.genre,
@@ -628,7 +853,7 @@ def get_content_based_recommendations_db(user_id: int, limit: int = 20):
                 LIMIT %s
             """
 
-            params = genre_params + ([interacted_books] if interacted_books else []) + [limit]
+            params = genre_params + [limit]
             cur.execute(query, params)
             return cur.fetchall()
 
@@ -658,22 +883,25 @@ def get_hybrid_recommendations_db(user_id: int, limit: int = 20):
         # Add collaborative books first (highest priority)
         for book in collaborative_books:
             if book['id'] not in seen_ids:
-                book['recommendation_type'] = 'collaborative'
-                combined_books.append(book)
+                book_dict = dict(book)
+                book_dict['recommendation_type'] = 'collaborative'
+                combined_books.append(book_dict)
                 seen_ids.add(book['id'])
         
         # Add content-based books
         for book in content_books:
             if book['id'] not in seen_ids and len(combined_books) < limit:
-                book['recommendation_type'] = 'content_based'
-                combined_books.append(book)
+                book_dict = dict(book)
+                book_dict['recommendation_type'] = 'content_based'
+                combined_books.append(book_dict)
                 seen_ids.add(book['id'])
         
         # Add trending books as fallback
         for book in trending_books:
             if book['id'] not in seen_ids and len(combined_books) < limit:
-                book['recommendation_type'] = 'trending'
-                combined_books.append(book)
+                book_dict = dict(book)
+                book_dict['recommendation_type'] = 'trending'
+                combined_books.append(book_dict)
                 seen_ids.add(book['id'])
         
         return combined_books[:limit]
