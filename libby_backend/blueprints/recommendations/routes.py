@@ -489,30 +489,30 @@ def refresh_user_recommendations(user_id: str):
             'error': 'Failed to refresh recommendations'
         }), 500
 
+
 @rec_bp.route("/interactions", methods=["POST"])
 @require_engine
 def record_user_interaction():
-    """Record a user interaction with a book (enhanced with rating support)"""
+    """Record a user interaction with a book (writes to DB and engine, supports Clerk IDs and rating)"""
     try:
         data = request.get_json()
-        
         if not data:
             return jsonify({
                 'success': False,
                 'error': 'No data provided'
             }), 400
-        
+
         user_id = data.get('user_id')
         book_id = data.get('book_id')
         interaction_type = data.get('type')
         rating = data.get('rating')
-        
+
         if not all([user_id, book_id, interaction_type]):
             return jsonify({
                 'success': False,
                 'error': 'Missing required fields: user_id, book_id, type'
             }), 400
-        
+
         # Validate interaction type
         valid_types = ['view', 'wishlist_add', 'wishlist_remove', 'search', 'click', 'like', 'dislike', 'rate']
         if interaction_type not in valid_types:
@@ -520,7 +520,7 @@ def record_user_interaction():
                 'success': False,
                 'error': f'Invalid interaction type. Must be one of: {", ".join(valid_types)}'
             }), 400
-        
+
         # Validate rating if provided
         if rating is not None:
             try:
@@ -535,8 +535,38 @@ def record_user_interaction():
                     'success': False,
                     'error': 'Invalid rating format'
                 }), 400
-        
-        # Enhanced interaction weights
+
+        # Convert user_id for DB storage, retain Clerk ID if present
+        try:
+            if isinstance(user_id, str) and user_id.startswith('user_'):
+                import hashlib
+                user_id_int = int(hashlib.md5(user_id.encode()).hexdigest()[:8], 16)
+                clerk_user_id = user_id
+            else:
+                user_id_int = int(user_id)
+                clerk_user_id = None
+        except (ValueError, TypeError):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid user_id format'
+            }), 400
+        try:
+            book_id_int = int(book_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid book_id format'
+            }), 400
+
+        # Record the interaction in the database (always)
+        db_result = record_user_interaction_db(
+            user_id=user_id_int,
+            clerk_user_id=clerk_user_id,
+            book_id=book_id_int,
+            interaction_type=interaction_type
+        )
+
+        # Map weights for engine
         weight_mapping = {
             'view': 1.0,
             'click': 1.2,
@@ -547,39 +577,56 @@ def record_user_interaction():
             'search': 0.5,
             'dislike': -0.5
         }
-        
         weight = weight_mapping.get(interaction_type, 1.0)
-        
-        # Record enhanced interaction
-        recommendation_engine.record_user_interaction(
-            user_id=str(user_id),
-            book_id=int(book_id),
-            interaction_type=interaction_type,
-            weight=weight,
-            rating=rating
-        )
-        
-        return jsonify({
-            'success': True,
-            'message': f'Enhanced interaction recorded: {interaction_type} for book {book_id}',
-            'user_id': user_id,
-            'book_id': book_id,
-            'interaction_type': interaction_type,
-            'weight': weight,
-            'rating': rating,
-            'enhanced': True
-        })
-        
-    except ValueError as e:
-        return jsonify({
-            'success': False,
-            'error': 'Invalid book_id format'
-        }), 400
+
+        # Record in recommendation engine
+        engine_success = False
+        engine_error = None
+        try:
+            recommendation_engine.record_user_interaction(
+                user_id=str(user_id),  # pass as Clerk string if available
+                book_id=book_id_int,
+                interaction_type=interaction_type,
+                weight=weight,
+                rating=rating
+            )
+            engine_success = True
+        except Exception as e:
+            engine_error = str(e)
+            logger.warning(f"Failed to record in recommendation engine: {e}")
+
+        if db_result:
+            return jsonify({
+                'success': True,
+                'message': f'Interaction recorded: {interaction_type}',
+                'db_interaction': {
+                    'id': db_result.get('id'),
+                    'user_id': db_result.get('user_id'),
+                    'clerk_user_id': db_result.get('clerk_user_id'),
+                    'book_id': db_result.get('book_id'),
+                    'interaction_type': db_result.get('interaction_type'),
+                    'timestamp': db_result.get('timestamp')
+                },
+                'engine_recorded': engine_success,
+                'engine_error': engine_error,
+                'user_id': user_id,
+                'book_id': book_id,
+                'interaction_type': interaction_type,
+                'weight': weight,
+                'rating': rating
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to record interaction in database',
+                'engine_recorded': engine_success,
+                'engine_error': engine_error
+            }), 500
     except Exception as e:
-        logger.error(f"Error recording enhanced interaction: {e}")
+        logger.error(f"Error recording interaction: {e}")
         return jsonify({
             'success': False,
-            'error': 'Failed to record enhanced interaction',
+            'error': 'Failed to record interaction',
             'details': str(e)
         }), 500
 
@@ -1172,109 +1219,6 @@ def clear_cache():
 # NOTE: record_view() is commented out because record_book_click() below handles all interaction types
 # including "view", and provides more comprehensive functionality with better error handling
 
-@rec_bp.route("/interactions/click", methods=["POST"])
-def record_book_click():
-    """Record when user clicks on a book"""
-    try:
-        data = request.get_json()
-        
-        if not data:
-            return jsonify({
-                'success': False,
-                'error': 'No data provided'
-            }), 400
-        
-        user_id = data.get('user_id')
-        book_id = data.get('book_id')
-        interaction_type = data.get('type', 'click')  # Default to 'click'
-        rating = data.get('rating')  # Optional rating
-        
-        # Validate required fields
-        if not user_id or not book_id:
-            return jsonify({
-                'success': False,
-                'error': 'Missing required fields: user_id, book_id'
-            }), 400
-        
-        # Convert user_id if it's a string (from Clerk)
-        try:
-            # If user_id is a Clerk ID (string), we need to handle it differently
-            if isinstance(user_id, str) and user_id.startswith('user_'):
-                # Store the Clerk user ID, but we need to map it to our integer user_id
-                # For now, let's hash it to get a consistent integer
-                import hashlib
-                user_id_int = int(hashlib.md5(user_id.encode()).hexdigest()[:8], 16)
-            else:
-                user_id_int = int(user_id)
-        except (ValueError, TypeError):
-            return jsonify({
-                'success': False,
-                'error': 'Invalid user_id format'
-            }), 400
-        
-        try:
-            book_id_int = int(book_id)
-        except (ValueError, TypeError):
-            return jsonify({
-                'success': False,
-                'error': 'Invalid book_id format'
-            }), 400
-        
-        # Record the interaction in the database
-        result = record_user_interaction_db(
-            user_id=user_id_int,
-            clerk_user_id=user_id if isinstance(user_id, str) and user_id.startswith('user_') else None,
-            book_id=book_id_int,
-            interaction_type=interaction_type
-        )
-        
-        if result:
-            # Also record in the recommendation engine for enhanced tracking
-            try:
-                if recommendation_engine:
-                    weight_mapping = {
-                        'click': 1.5,
-                        'view': 1.0,
-                        'wishlist_add': 3.0,
-                        'like': 2.0,
-                        'rate': 2.5
-                    }
-                    weight = weight_mapping.get(interaction_type, 1.0)
-                    
-                    recommendation_engine.record_user_interaction(
-                        user_id=str(user_id),  # Keep as string for recommendation engine
-                        book_id=book_id_int,
-                        interaction_type=interaction_type,
-                        weight=weight,
-                        rating=rating
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to record in recommendation engine: {e}")
-            
-            return jsonify({
-                'success': True,
-                'message': f'Book click recorded: {interaction_type}',
-                'interaction': {
-                    'id': result['id'],
-                    'user_id': result['user_id'],
-                    'book_id': result['book_id'],
-                    'interaction_type': result['interaction_type'],
-                    'timestamp': result['timestamp']
-                }
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'error': 'Failed to record interaction'
-            }), 500
-            
-    except Exception as e:
-        logger.error(f"Error recording book click: {e}")
-        return jsonify({
-            'success': False,
-            'error': 'Internal server error',
-            'details': str(e)
-        }), 500
 
 @rec_bp.route("/<user_id>/collaborative", methods=["GET"])
 def get_collaborative_recommendations(user_id: str):

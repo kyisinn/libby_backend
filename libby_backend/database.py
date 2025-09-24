@@ -44,23 +44,25 @@ def create_user_interactions_table():
                 print("user_interactions table already exists")
                 return True
             
-            # Create the table with a simpler approach
+            # Create the table with clerk_user_id column after user_id
             cur.execute("""
                 CREATE TABLE user_interactions (
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL,
+                    clerk_user_id TEXT,
                     book_id INTEGER NOT NULL,
                     interaction_type VARCHAR(50) NOT NULL DEFAULT 'view',
                     rating DECIMAL(3,2) DEFAULT NULL,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            
+
             # Create indexes separately
             cur.execute("CREATE INDEX idx_user_interactions_user_id ON user_interactions(user_id);")
+            cur.execute("CREATE INDEX idx_user_interactions_clerk_user_id ON user_interactions(clerk_user_id);")
             cur.execute("CREATE INDEX idx_user_interactions_book_id ON user_interactions(book_id);")
             cur.execute("CREATE INDEX idx_user_interactions_timestamp ON user_interactions(timestamp);")
-            
+
             conn.commit()
             print("user_interactions table created successfully")
             return True
