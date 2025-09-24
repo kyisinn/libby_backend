@@ -577,75 +577,61 @@ class EnhancedBookRecommendationEngine:
             logger.error(f"Error getting books by author: {e}")
             return []
     
-    def record_user_interaction(self, user_id: str, book_id: int, interaction_type: str, weight: float = 1.0, rating: float = None):
-        """Enhanced interaction recording with rating support"""
+    def record_user_interaction(self, clerk_user_id: str, book_id: int, interaction_type: str, weight: float = 1.0, rating: float = None):
+        """Enhanced interaction recording with rating support (PostgreSQL version)"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT INTO user_interactions (user_id, book_id, interaction_type, weight, rating)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (user_id, book_id, interaction_type, weight, rating))
-            
-            conn.commit()
+            conn = get_db_connection()
+            if not conn:
+                logger.error("No database connection available for recording user interaction")
+                return
+            with conn.cursor() as cursor:
+                # Insert into user_interactions (PostgreSQL version)
+                timestamp = datetime.now()
+                cursor.execute(
+                    '''
+                    INSERT INTO user_interactions (user_id, clerk_user_id, book_id, interaction_type, rating, timestamp)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ''',
+                    (clerk_user_id, clerk_user_id, book_id, interaction_type, rating, timestamp)
+                )
+                conn.commit()
             conn.close()
-            
             # Update user preferences based on interaction
-            self._update_user_preferences(user_id, book_id, interaction_type, weight)
-            
-            logger.info(f"Enhanced interaction recorded: {user_id} -> {book_id} ({interaction_type}, weight: {weight})")
-            
+            self._update_user_preferences(clerk_user_id, book_id, interaction_type, weight)
+            logger.info(f"Enhanced interaction recorded: {clerk_user_id} -> {book_id} ({interaction_type}, weight: {weight})")
         except Exception as e:
             logger.error(f"Error recording enhanced interaction: {e}")
     
-    def _update_user_preferences(self, user_id: str, book_id: int, interaction_type: str, weight: float):
-        """Update user preferences based on interactions"""
+    def _update_user_preferences(self, clerk_user_id: str, book_id: int, interaction_type: str, weight: float):
+        """Update user interests (genres) in user_interests table (PostgreSQL version)"""
         try:
             # Get book details
             book_data = get_book_by_id_db(book_id)
-            if not book_data:
+            if not book_data or not book_data.get('genre'):
                 return
-            
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Get current preferences
-            cursor.execute('''
-                SELECT preferred_genres, favorite_authors, rating_threshold
-                FROM user_preferences
-                WHERE user_id = ?
-            ''', (user_id,))
-            
-            current = cursor.fetchone()
-            preferred_genres = []
-            favorite_authors = []
-            rating_threshold = 3.0
-            
-            if current:
-                preferred_genres = json.loads(current[0]) if current[0] else []
-                favorite_authors = json.loads(current[1]) if current[1] else []
-                rating_threshold = current[2] or 3.0
-            
-            # Update based on positive interactions
-            if interaction_type in ['wishlist_add', 'like'] and weight > 0:
-                if book_data.get('genre') and book_data['genre'] not in preferred_genres:
-                    preferred_genres.append(book_data['genre'])
-                if book_data.get('author') and book_data['author'] not in favorite_authors:
-                    favorite_authors.append(book_data['author'])
-            
-            # Save updated preferences
-            cursor.execute('''
-                INSERT OR REPLACE INTO user_preferences 
-                (user_id, preferred_genres, favorite_authors, rating_threshold)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, json.dumps(preferred_genres), json.dumps(favorite_authors), rating_threshold))
-            
-            conn.commit()
+            genre = book_data.get('genre')
+            # Only update on positive interactions
+            if interaction_type not in ['wishlist_add', 'like'] or weight <= 0:
+                return
+            conn = get_db_connection()
+            if not conn:
+                logger.error("No database connection available for updating user interests")
+                return
+            with conn.cursor() as cursor:
+                # Remove all existing genres for this user
+                cursor.execute(
+                    "DELETE FROM user_interests WHERE user_id = %s",
+                    (clerk_user_id,)
+                )
+                # Insert the new genre
+                cursor.execute(
+                    "INSERT INTO user_interests (user_id, genre) VALUES (%s, %s)",
+                    (clerk_user_id, genre)
+                )
+                conn.commit()
             conn.close()
-            
         except Exception as e:
-            logger.error(f"Error updating user preferences: {e}")
+            logger.error(f"Error updating user interests: {e}")
     
     def get_user_profile_enhanced(self, user_id: str, email: str = None, selected_genres: List[str] = None) -> UserProfile:
         """Enhanced user profile building with author preferences and rating thresholds"""
@@ -1765,32 +1751,25 @@ class EnhancedBookRecommendationEngine:
         return None
     
     def _cache_recommendations(self, user_id: str, result: RecommendationResult):
-        """Cache recommendations with proper JSON serialization"""
+        """Cache recommendations in PostgreSQL recommendations table"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Prepare data for caching with safe serialization
-            cache_data = {
-                'books': [serialize_for_cache(book) for book in result.books],
-                'confidence_score': float(result.confidence_score),
-                'reasons': result.reasons
-            }
-            
-            # Cache expires in 24 hours
-            expires_at = datetime.now() + timedelta(hours=24)
-            
-            cursor.execute('''
-                INSERT OR REPLACE INTO user_recommendations 
-                (user_id, recommendations, algorithm_used, expires_at)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, json.dumps(cache_data, default=str), result.algorithm_used, expires_at))
-            
-            conn.commit()
+            conn = get_db_connection()
+            if not conn:
+                logger.error("No database connection available for caching recommendations")
+                return
+            with conn.cursor() as cursor:
+                now = datetime.now()
+                for book in result.books:
+                    cursor.execute(
+                        """
+                        INSERT INTO recommendations (user_id, book_id, recommendation_type, create_at, is_viewed)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (user_id, book.id, result.algorithm_used, now, False)
+                    )
+                conn.commit()
             conn.close()
-            
             logger.info(f"Cached recommendations for {user_id}")
-            
         except Exception as e:
             logger.error(f"Error caching recommendations: {e}")
     
