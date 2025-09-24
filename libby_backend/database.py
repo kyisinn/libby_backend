@@ -48,7 +48,7 @@ def create_user_interactions_table():
             cur.execute("""
                 CREATE TABLE user_interactions (
                     id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
+                    user_id INTEGER,
                     clerk_user_id TEXT,
                     book_id INTEGER NOT NULL,
                     interaction_type VARCHAR(50) NOT NULL DEFAULT 'view',
@@ -695,7 +695,7 @@ def initialize_recommendation_tables():
 # Add this function to handle the interaction recording from frontend
 def record_book_click(user_id: int, book_id: int, interaction_type: str = "click"):
     """Record when user clicks on a book"""
-    return record_user_interaction_db(user_id, book_id, interaction_type)
+    return record_user_interaction_db(user_id=user_id, clerk_user_id=None, book_id=book_id, interaction_type=interaction_type)
 
 
 # -----------------------------------------------------------------------------
