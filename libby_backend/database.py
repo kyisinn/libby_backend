@@ -424,7 +424,14 @@ def record_user_interaction_db(
     interaction_type: str = "view",
     rating: float = None
 ):
-    """Enhanced user interaction recording with both user_id and clerk_user_id"""
+    """
+    Enhanced user interaction recording with both user_id and clerk_user_id.
+    At least one of user_id or clerk_user_id is required.
+    Returns the inserted row or None on error.
+    """
+    if not user_id and not clerk_user_id:
+        print("record_user_interaction_db error: missing both user_id and clerk_user_id")
+        return None
     conn = get_db_connection()
     if not conn:
         return None
