@@ -1835,18 +1835,20 @@ class EnhancedBookRecommendationEngine:
     def get_recommendation_stats(self, user_id: str) -> Dict:
         """Get statistics about user's recommendation history"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Get interaction stats
-            cursor.execute('''
-                SELECT interaction_type, COUNT(*) as count
-                FROM user_interactions
-                WHERE user_id = ?
-                GROUP BY interaction_type
-            ''', (user_id,))
-            
-            interaction_stats = dict(cursor.fetchall())
+            conn = get_db_connection()
+            if not conn:
+                return {}
+                
+            with conn.cursor() as cursor:
+                # Get interaction stats
+                cursor.execute('''
+                    SELECT interaction_type, COUNT(*) as count
+                    FROM user_interactions
+                    WHERE clerk_user_id = %s
+                    GROUP BY interaction_type
+                ''', (user_id,))
+                
+                interaction_stats = dict(cursor.fetchall())
             
             # Get recommendation cache info
             cursor.execute('''
@@ -1858,21 +1860,22 @@ class EnhancedBookRecommendationEngine:
             ''', (user_id,))
             
             cache_info = cursor.fetchone()
-            conn.close()
-            
             stats = {
-                'total_interactions': sum(interaction_stats.values()),
+                'total_interactions': sum(interaction_stats.values()) if interaction_stats else 0,
                 'views': interaction_stats.get('view', 0),
-                'wishlist_items': interaction_stats.get('wishlist', 0),
+                'wishlist_items': interaction_stats.get('wishlist_add', 0) - interaction_stats.get('wishlist_remove', 0),
                 'searches': interaction_stats.get('search', 0),
                 'last_recommendation': cache_info[0] if cache_info else None,
                 'last_algorithm': cache_info[1] if cache_info else None
             }
             
+            conn.close()
             return stats
             
         except Exception as e:
             logger.error(f"Error getting recommendation stats: {e}")
+            if 'conn' in locals() and conn:
+                conn.close()
             return {}
     
     def cleanup_old_data(self, days_to_keep: int = 90):
