@@ -1718,35 +1718,67 @@ class EnhancedBookRecommendationEngine:
     def _get_cached_recommendations(self, user_id: str) -> Optional[RecommendationResult]:
         """Get cached recommendations if still valid"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT recommendations, algorithm_used, generated_at
-                FROM user_recommendations
-                WHERE user_id = ? AND expires_at > ?
-            ''', (user_id, datetime.now()))
-            
-            result = cursor.fetchone()
-            conn.close()
-            
-            if result:
-                recommendations_data, algorithm_used, generated_at = result
-                import json
-                data = json.loads(recommendations_data)
+            conn = get_db_connection()
+            if not conn:
+                return None
                 
-                books = [Book(**book_data) for book_data in data['books']]
+            with conn.cursor() as cursor:
+                # Get the most recent recommendations for this user
+                cursor.execute('''
+                    SELECT r.book_id, b.title, b.author, b.genre, b.description, 
+                           b.cover_image_url, b.rating, b.publication_date, b.pages,
+                           b.language, b.isbn, r.recommendation_type, r.create_at
+                    FROM recommendations r
+                    JOIN books b ON r.book_id = b.id
+                    WHERE r.user_id = %s AND r.create_at >= %s
+                    ORDER BY r.create_at DESC
+                    LIMIT 20
+                ''', (user_id, datetime.now() - timedelta(hours=24)))
+                
+                results = cursor.fetchall()
+                
+                if not results:
+                    return None
+                    
+                books = []
+                algorithm_used = None
+                generated_at = None
+                
+                for row in results:
+                    book = Book(
+                        id=row[0],
+                        title=row[1],
+                        author=row[2],
+                        genre=row[3],
+                        description=row[4],
+                        cover_image_url=row[5],
+                        rating=row[6],
+                        publication_date=str(row[7]) if row[7] else None,
+                        pages=row[8],
+                        language=row[9],
+                        isbn=row[10]
+                    )
+                    books.append(book)
+                    
+                    if not algorithm_used:
+                        algorithm_used = row[11]
+                    if not generated_at:
+                        generated_at = row[12]
+                
+                conn.close()
                 
                 return RecommendationResult(
                     books=books,
-                    algorithm_used=algorithm_used,
-                    confidence_score=data['confidence_score'],
-                    reasons=data['reasons'],
-                    generated_at=datetime.fromisoformat(generated_at)
+                    algorithm_used=algorithm_used or "Cached Recommendations",
+                    confidence_score=0.7,  # Default confidence for cached results
+                    reasons=["Recently generated recommendations"],
+                    generated_at=generated_at or datetime.now()
                 )
                 
         except Exception as e:
             logger.error(f"Error getting cached recommendations: {e}")
+            if 'conn' in locals() and conn:
+                conn.close()
             
         return None
     
@@ -1757,17 +1789,42 @@ class EnhancedBookRecommendationEngine:
             if not conn:
                 logger.error("No database connection available for caching recommendations")
                 return
+                
             with conn.cursor() as cursor:
+                # First, clear any existing recent recommendations for this user
+                cursor.execute("""
+                    DELETE FROM recommendations 
+                    WHERE user_id = %s AND create_at >= %s
+                """, (user_id, datetime.now() - timedelta(hours=24)))
+                
+                # Then insert new recommendations
                 now = datetime.now()
                 for book in result.books:
                     cursor.execute(
                         """
-                        INSERT INTO recommendations (user_id, book_id, recommendation_type, create_at, is_viewed)
+                        INSERT INTO recommendations 
+                        (user_id, book_id, recommendation_type, create_at, is_viewed)
                         VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (user_id, book_id, create_at::date) 
+                        DO UPDATE SET 
+                            recommendation_type = EXCLUDED.recommendation_type,
+                            create_at = EXCLUDED.create_at,
+                            is_viewed = EXCLUDED.is_viewed
                         """,
                         (user_id, book.id, result.algorithm_used, now, False)
                     )
                 conn.commit()
+                
+                # Log the algorithm update
+                logger.info(f"Updated recommendations for user {user_id} using algorithm: {result.algorithm_used}")
+                
+            if conn:
+                conn.close()
+                
+        except Exception as e:
+            logger.error(f"Error caching recommendations: {e}")
+            if 'conn' in locals() and conn:
+                conn.close()
             conn.close()
             logger.info(f"Cached recommendations for {user_id}")
         except Exception as e:
