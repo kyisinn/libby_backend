@@ -1223,9 +1223,9 @@ def record_book_click():
         # Record the interaction in the database
         result = record_user_interaction_db(
             user_id=user_id_int,
+            clerk_user_id=user_id if isinstance(user_id, str) and user_id.startswith('user_') else None,
             book_id=book_id_int,
-            interaction_type=interaction_type,
-            rating=rating
+            interaction_type=interaction_type
         )
         
         if result:

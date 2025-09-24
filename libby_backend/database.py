@@ -415,57 +415,39 @@ def get_book_by_id_db(book_id):
 #     finally:
 #         conn.close()
 
-def record_user_interaction_db(user_id: int, book_id: int, interaction_type: str = "view", rating: float = None):
-    """Enhanced user interaction recording with more interaction types"""
+def record_user_interaction_db(
+    user_id: int = None,
+    clerk_user_id: str = None,
+    book_id: int = None,
+    interaction_type: str = "view",
+    rating: float = None
+):
+    """Enhanced user interaction recording with both user_id and clerk_user_id"""
     conn = get_db_connection()
     if not conn:
         return None
     try:
         with conn.cursor() as cur:
-            # First, try to insert into the table
             cur.execute("""
-                INSERT INTO user_interactions (user_id, book_id, interaction_type, rating, timestamp)
-                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                RETURNING id, user_id, book_id, interaction_type, timestamp
-            """, (user_id, book_id, interaction_type, rating))
+                INSERT INTO user_interactions (user_id, clerk_user_id, book_id, interaction_type, rating, timestamp)
+                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                RETURNING id, user_id, clerk_user_id, book_id, interaction_type, rating, timestamp
+            """, (user_id, clerk_user_id, book_id, interaction_type, rating))
+            
             result = cur.fetchone()
             conn.commit()
             return result
     except psycopg2.errors.UndefinedTable:
-        # Table doesn't exist, create it
         print("user_interactions table doesn't exist, creating it...")
         conn.rollback()
-        conn.close()
-        
-        # Create the table
-        if create_user_interactions_table():
-            # Retry the insert
-            conn = get_db_connection()
-            if conn:
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            INSERT INTO user_interactions (user_id, book_id, interaction_type, rating, timestamp)
-                            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                            RETURNING id, user_id, book_id, interaction_type, timestamp
-                        """, (user_id, book_id, interaction_type, rating))
-                        result = cur.fetchone()
-                        conn.commit()
-                        return result
-                except Exception as e:
-                    print("record_user_interaction_db retry error:", e)
-                    conn.rollback()
-                    return None
-                finally:
-                    conn.close()
+        create_user_interactions_table()
         return None
     except Exception as e:
         print("record_user_interaction_db error:", e)
         conn.rollback()
         return None
     finally:
-        if conn and not conn.closed:
-            conn.close()
+        conn.close()
 
 def get_user_interactions_db(user_id: int, limit: int = 100):
     """Get user interaction history"""
