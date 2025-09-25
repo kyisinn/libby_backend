@@ -4,6 +4,7 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
 from libby_backend.cache import init_cache
+import os, re
 
 from libby_backend.blueprints.clerk.routes import clerk_bp
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -27,12 +28,13 @@ app.config.from_object(Config)
 
 app.register_blueprint(clerk_bp)
 
+VERCEL_ORIGIN = "https://libby-bot.vercel.app"
 ALLOWED_ORIGINS = [
-    "https://libby-bot.vercel.app",   
+    VERCEL_ORIGIN,
     "http://localhost:3000",
     "http://127.0.0.1:3000"
 ]
-
+origin_regex = re.compile(r"^https://[-a-z0-9]+\.vercel\.app$") 
 CORS(
     app,
     resources={r"/api/*": {"origins": ALLOWED_ORIGINS}},
