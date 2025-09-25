@@ -860,9 +860,9 @@ def record_book_click(user_id: int, book_id: int, interaction_type: str = "click
 # -----------------------------------------------------------------------------
 # USER INTERESTS
 # -----------------------------------------------------------------------------
-def save_user_interests_db(user_id: int, clerk_user_id: str, interests: list[str]):
+def save_user_interests_db(clerk_user_id: str, interests: list[str]):
     """
-    Save a user's interests to the user_interests table.
+    Save a user's interests to the user_interests table using only clerk_user_id.
     Ensures the user_interests table exists, deletes old interests, and inserts new ones.
     Returns True on success, False on error.
     """
@@ -875,20 +875,21 @@ def save_user_interests_db(user_id: int, clerk_user_id: str, interests: list[str
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS user_interests (
                     id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
                     clerk_user_id TEXT NOT NULL,
                     genre VARCHAR(255) NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            # Delete previous interests for this user (by user_id)
-            cur.execute("DELETE FROM user_interests WHERE user_id = %s;", (user_id,))
-            # Insert new interests (user_id, clerk_user_id, genre)
+            # Delete previous interests for this user (by clerk_user_id)
+            cur.execute("DELETE FROM user_interests WHERE clerk_user_id = %s;", (clerk_user_id,))
+            
+            # Insert new interests
             for genre in interests:
                 cur.execute(
-                    "INSERT INTO user_interests (user_id, clerk_user_id, genre) VALUES (%s, %s, %s);",
-                    (user_id, clerk_user_id, genre)
+                    "INSERT INTO user_interests (clerk_user_id, genre) VALUES (%s, %s);",
+                    (clerk_user_id, genre)
                 )
+            
             conn.commit()
             return True
     except Exception as e:
