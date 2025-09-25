@@ -4,7 +4,15 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
 from libby_backend.cache import init_cache
+
 from libby_backend.blueprints.clerk.routes import clerk_bp
+from apscheduler.schedulers.background import BackgroundScheduler
+import atexit
+
+# Notify prefs blueprint and digest runner
+from libby_backend.notify_prefs_routes import prefs_bp
+from libby_backend.digests import send_due_digests_batch
+
 
 
 
@@ -21,7 +29,8 @@ app.register_blueprint(clerk_bp)
 
 ALLOWED_ORIGINS = [
     "https://libby-bot.vercel.app",   
-    "http://localhost:3000",          
+    "http://localhost:3000",
+    "http://127.0.0.1:3000"
 ]
 
 CORS(
@@ -63,6 +72,31 @@ app.register_blueprint(profile_bp, url_prefix="/api/profile")
 
 from libby_backend.blueprints.utils.routes import utils_bp
 app.register_blueprint(utils_bp, url_prefix="/api")
+
+# Register notify prefs endpoints
+app.register_blueprint(prefs_bp)
+
+# Scheduler (works if your process stays warm; otherwise use platform cron to hit /api/notify/run-due)
+scheduler = BackgroundScheduler(timezone="UTC")
+# Job configured with max_instances=1 to prevent overlapping runs
+scheduler.add_job(
+    send_due_digests_batch,
+    "cron",
+    hour=2,
+    minute=0,
+    id="send_due_digests",
+    max_instances=1,
+)
+scheduler.start()
+
+# Ensure scheduler is shut down cleanly when the process exits
+atexit.register(lambda: scheduler.shutdown(wait=False))
+
+
+@app.route("/api/notify/run-due", methods=["POST"])
+def run_due_now():
+    count = send_due_digests_batch()
+    return jsonify({"ok": True, "sent": count})
 
 # =============================================================================
 # HEALTH CHECK (fallback if no health blueprint is present)
