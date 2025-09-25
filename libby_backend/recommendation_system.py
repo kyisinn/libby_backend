@@ -1214,7 +1214,7 @@ class EnhancedBookRecommendationEngine:
         
         return recommendations[:limit], reasons
     
-    def hybrid_recommendations_enhanced(self, profile: UserProfile, total_limit: int = 20) -> RecommendationResult:
+    def hybrid_recommendations_enhanced(self, profile: UserProfile, total_limit: int = 30) -> RecommendationResult:
         """Enhanced hybrid recommendations with better book data integration"""
         try:
             # ---------- hydrate from DB (keep yours)
