@@ -1609,7 +1609,7 @@ class EnhancedBookRecommendationEngine:
     
     def get_recommendations_for_user_enhanced(self, user_id: str, email: str = None, 
                                            selected_genres: List[str] = None, 
-                                           limit: int = 20, force_refresh: bool = False) -> RecommendationResult:
+                                           limit: int = 30, force_refresh: bool = False) -> RecommendationResult:
         """Enhanced recommendation generation with better caching and fallbacks"""
         try:
             # Check cache first unless force refresh
@@ -1680,7 +1680,7 @@ class EnhancedBookRecommendationEngine:
                 generated_at=datetime.now()
             )
     
-    def hybrid_recommendations(self, profile: UserProfile, total_limit: int = 20) -> RecommendationResult:
+    def hybrid_recommendations(self, profile: UserProfile, total_limit: int = 30) -> RecommendationResult:
         """Generate hybrid recommendations combining multiple algorithms"""
         try:
             # hydrate profile from Postgres if clerk_user_id present
@@ -2463,7 +2463,7 @@ class EnhancedRecommendationAPI:
         self.engine = recommendation_engine
     
     def get_user_recommendations(self, user_id: str, email: str = None, 
-                               genres: List[str] = None, limit: int = 20) -> Dict:
+                               genres: List[str] = None, limit: int = 30) -> Dict:
         """Enhanced API endpoint for getting user recommendations"""
         try:
             result = self.engine.get_recommendations_for_user_enhanced(
