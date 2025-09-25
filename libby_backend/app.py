@@ -14,12 +14,19 @@ from libby_backend.config import Config
 app = Flask(__name__)
 app.config.from_object(Config)
 
+ALLOWED_ORIGINS = [
+    "https://libby-bot.vercel.app",   
+    "http://localhost:3000",          
+]
+
 CORS(
     app,
-    resources=Config.CORS_RESOURCES,
-    supports_credentials=Config.CORS_SUPPORTS_CREDENTIALS,
-    allow_headers=Config.CORS_ALLOW_HEADERS,
-    expose_headers=Config.CORS_EXPOSE_HEADERS,
+    resources={r"/api/*": {"origins": ALLOWED_ORIGINS}},
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    expose_headers=["Content-Length", "Content-Type"],
+    max_age=86400,
+    supports_credentials=False,  # set True ONLY if you send cookies
 )
 cache = init_cache(app)
 
