@@ -545,52 +545,56 @@ def collaborative_filtering_recommendations_pg(clerk_user_id: Optional[str], use
             # 3) rec: candidate books from similar users that I haven't interacted with,
             #         scored by interaction weight * similarity factor
             cur.execute(f"""
-                WITH my_books AS (
+                WITH me AS (
+                    SELECT %s::BIGINT AS uid, %s::TEXT AS cid
+                ),
+                my_books AS (
                     SELECT DISTINCT ui.book_id
-                    FROM public.user_interactions ui
-                    WHERE (ui.user_id = %s OR ui.clerk_user_id = %s)
+                    FROM public.user_interactions ui, me
+                    WHERE (ui.user_id = me.uid OR ui.clerk_user_id = me.cid)
                       AND ui.interaction_type = ANY(%s)
                 ),
-                sim AS (
-                    SELECT ui2.user_id, COUNT(*) AS common_books
+                others AS (
+                    SELECT
+                        COALESCE(ui2.user_id::TEXT, ui2.clerk_user_id) AS other_key,
+                        COUNT(*) AS common_books
                     FROM public.user_interactions ui1
                     JOIN public.user_interactions ui2
                       ON ui1.book_id = ui2.book_id
-                     AND (ui1.user_id IS DISTINCT FROM ui2.user_id
-                          OR ui1.clerk_user_id IS DISTINCT FROM ui2.clerk_user_id)
-                    WHERE (ui1.user_id = %s OR ui1.clerk_user_id = %s)
+                    JOIN me ON TRUE
+                    WHERE (ui1.user_id = me.uid OR ui1.clerk_user_id = me.cid)
                       AND ui1.interaction_type = ANY(%s)
                       AND ui2.interaction_type = ANY(%s)
-                    GROUP BY ui2.user_id
+                      AND COALESCE(ui1.user_id::TEXT, ui1.clerk_user_id)
+                          <> COALESCE(ui2.user_id::TEXT, ui2.clerk_user_id)
+                    GROUP BY 1
                     HAVING COUNT(*) >= 2
                 ),
                 rec AS (
-                    SELECT 
-                        ui.book_id,
-                        SUM(
-                            CASE ui.interaction_type
-                              WHEN 'view' THEN 1.0
-                              WHEN 'like' THEN 2.0
-                              WHEN 'wishlist_add' THEN 3.0
-                              WHEN 'rate' THEN 1.5 + COALESCE(ui.rating,0)/10.0
-                              ELSE 0.5
-                            END
-                            * (1 + LEAST(s.common_books/5.0, 1.0))
-                        ) AS score
+                    SELECT ui.book_id,
+                           SUM(
+                               CASE ui.interaction_type
+                                   WHEN 'view'         THEN 1.0
+                                   WHEN 'like'         THEN 2.0
+                                   WHEN 'wishlist_add' THEN 3.0
+                                   WHEN 'rate'         THEN 1.5 + COALESCE(ui.rating,0)/10.0
+                                   ELSE 0.5
+                               END * (1 + LEAST(others.common_books/5.0, 1.0))
+                           ) AS score
                     FROM public.user_interactions ui
-                    JOIN sim s ON ui.user_id = s.user_id
+                    JOIN others
+                      ON COALESCE(ui.user_id::TEXT, ui.clerk_user_id) = others.other_key
                     WHERE ui.book_id NOT IN (SELECT book_id FROM my_books)
                     GROUP BY ui.book_id
                 )
-                SELECT b.book_id, b.title, b.author, b.genre, b.cover_image_url, r.score
-                FROM rec r
-                JOIN public.books b ON b.book_id = r.book_id
-                ORDER BY r.score DESC
+                SELECT b.book_id, b.title, b.author, b.genre, b.cover_image_url, b.rating, rec.score
+                FROM rec
+                JOIN public.books b ON b.book_id = rec.book_id
+                ORDER BY rec.score DESC
                 LIMIT %s
             """, (
                 user_id, clerk_user_id, list(positives),
-                user_id, clerk_user_id, list(positives), list(positives),
-                limit
+                list(positives), list(positives), limit
             ))
             rows = cur.fetchall()
 
@@ -610,83 +614,83 @@ def get_collaborative_recommendations_db(user_id: Optional[int] = None, limit: i
     rows, _ = collaborative_filtering_recommendations_pg(clerk_user_id=clerk_user_id, user_id=user_id, limit=limit)
     return rows
 
-def get_collaborative_recommendations_db(user_id: Optional[int] = None, limit: int = 20, clerk_user_id: Optional[str] = None):
-    """Get collaborative filtering recommendations based on similar users.
+# def get_collaborative_recommendations_db(user_id: Optional[int] = None, limit: int = 20, clerk_user_id: Optional[str] = None):
+#     """Get collaborative filtering recommendations based on similar users.
 
-    This implementation accepts either a numeric `user_id` or a `clerk_user_id` (or both).
-    It finds similar users who share at least two positively-interacted books and
-    scores candidate books by interaction weight and similarity.
+#     This implementation accepts either a numeric `user_id` or a `clerk_user_id` (or both).
+#     It finds similar users who share at least two positively-interacted books and
+#     scores candidate books by interaction weight and similarity.
 
-    Returns a list of recommendation rows (dict-like objects) to preserve backward compatibility.
-    """
-    conn = get_db_connection()
-    if not conn:
-        return []
+#     Returns a list of recommendation rows (dict-like objects) to preserve backward compatibility.
+#     """
+#     conn = get_db_connection()
+#     if not conn:
+#         return []
 
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            positives = ("view", "like", "wishlist_add", "rate")
+#     try:
+#         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+#             positives = ("view", "like", "wishlist_add", "rate")
 
-            cur.execute("""
-                WITH my_books AS (
-                    SELECT DISTINCT ui.book_id
-                    FROM public.user_interactions ui
-                    WHERE (ui.user_id = %s OR ui.clerk_user_id = %s)
-                      AND ui.interaction_type = ANY(%s)
-                ),
-                sim AS (
-                    SELECT ui2.user_id, COUNT(*) AS common_books
-                    FROM public.user_interactions ui1
-                    JOIN public.user_interactions ui2
-                      ON ui1.book_id = ui2.book_id
-                     AND (ui1.user_id IS DISTINCT FROM ui2.user_id
-                          OR ui1.clerk_user_id IS DISTINCT FROM ui2.clerk_user_id)
-                    WHERE (ui1.user_id = %s OR ui1.clerk_user_id = %s)
-                      AND ui1.interaction_type = ANY(%s)
-                      AND ui2.interaction_type = ANY(%s)
-                    GROUP BY ui2.user_id
-                    HAVING COUNT(*) >= 2
-                ),
-                rec AS (
-                    SELECT 
-                        ui.book_id,
-                        SUM(
-                            CASE ui.interaction_type
-                              WHEN 'view' THEN 1.0
-                              WHEN 'like' THEN 2.0
-                              WHEN 'wishlist_add' THEN 3.0
-                              WHEN 'rate' THEN 1.5 + COALESCE(ui.rating,0)/10.0
-                              ELSE 0.5
-                            END
-                            * (1 + LEAST(s.common_books/5.0, 1.0))
-                        ) AS score
-                    FROM public.user_interactions ui
-                    JOIN sim s ON ui.user_id = s.user_id
-                    WHERE ui.book_id NOT IN (SELECT book_id FROM my_books)
-                    GROUP BY ui.book_id
-                )
-                SELECT b.book_id AS id, b.title, b.author, b.genre, b.cover_image_url AS coverurl, r.score
-                FROM rec r
-                JOIN public.books b ON b.book_id = r.book_id
-                ORDER BY r.score DESC
-                LIMIT %s
-            """, (
-                user_id, clerk_user_id, list(positives),
-                user_id, clerk_user_id, list(positives), list(positives),
-                limit
-            ))
+#             cur.execute("""
+#                 WITH my_books AS (
+#                     SELECT DISTINCT ui.book_id
+#                     FROM public.user_interactions ui
+#                     WHERE (ui.user_id = %s OR ui.clerk_user_id = %s)
+#                       AND ui.interaction_type = ANY(%s)
+#                 ),
+#                 sim AS (
+#                     SELECT ui2.user_id, COUNT(*) AS common_books
+#                     FROM public.user_interactions ui1
+#                     JOIN public.user_interactions ui2
+#                       ON ui1.book_id = ui2.book_id
+#                      AND (ui1.user_id IS DISTINCT FROM ui2.user_id
+#                           OR ui1.clerk_user_id IS DISTINCT FROM ui2.clerk_user_id)
+#                     WHERE (ui1.user_id = %s OR ui1.clerk_user_id = %s)
+#                       AND ui1.interaction_type = ANY(%s)
+#                       AND ui2.interaction_type = ANY(%s)
+#                     GROUP BY ui2.user_id
+#                     HAVING COUNT(*) >= 2
+#                 ),
+#                 rec AS (
+#                     SELECT 
+#                         ui.book_id,
+#                         SUM(
+#                             CASE ui.interaction_type
+#                               WHEN 'view' THEN 1.0
+#                               WHEN 'like' THEN 2.0
+#                               WHEN 'wishlist_add' THEN 3.0
+#                               WHEN 'rate' THEN 1.5 + COALESCE(ui.rating,0)/10.0
+#                               ELSE 0.5
+#                             END
+#                             * (1 + LEAST(s.common_books/5.0, 1.0))
+#                         ) AS score
+#                     FROM public.user_interactions ui
+#                     JOIN sim s ON ui.user_id = s.user_id
+#                     WHERE ui.book_id NOT IN (SELECT book_id FROM my_books)
+#                     GROUP BY ui.book_id
+#                 )
+#                 SELECT b.book_id AS id, b.title, b.author, b.genre, b.cover_image_url AS coverurl, r.score
+#                 FROM rec r
+#                 JOIN public.books b ON b.book_id = r.book_id
+#                 ORDER BY r.score DESC
+#                 LIMIT %s
+#             """, (
+#                 user_id, clerk_user_id, list(positives),
+#                 user_id, clerk_user_id, list(positives), list(positives),
+#                 limit
+#             ))
 
-            rows = cur.fetchall()
+#             rows = cur.fetchall()
 
-        # Add a human-readable reason when results exist
-        # (compatibility: function returns only rows as before)
-        return rows
+#         # Add a human-readable reason when results exist
+#         # (compatibility: function returns only rows as before)
+#         return rows
 
-    except Exception as e:
-        print("get_collaborative_recommendations_db error:", e)
-        return []
-    finally:
-        conn.close()
+#     except Exception as e:
+#         print("get_collaborative_recommendations_db error:", e)
+#         return []
+#     finally:
+#         conn.close()
 
 def get_user_genre_preferences_db(user_id: int):
     """Get user's preferred genres based on interaction history"""

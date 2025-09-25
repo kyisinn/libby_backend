@@ -322,6 +322,9 @@ def clear_user_cache(user_id: str):
             'success': False,
             'error': str(e)
         })
+    
+
+
 
 @rec_bp.route("/<user_id>/improve", methods=["GET"], endpoint="improve_recs")
 def get_improved_recommendations_with_fallbacks(user_id: str):
@@ -1464,7 +1467,7 @@ def get_hybrid_recommendations_route(user_id: str):
             }), 400
         
         # Get hybrid recommendations
-        hybrid_books = get_hybrid_recommendations_db(user_id_int, limit)
+        hybrid_books = get_hybrid_recommendations_db(user_id, limit)
         
         # Convert to expected format and add recommendation type info
         books_data = []
@@ -1594,7 +1597,7 @@ def get_user_genre_preferences_route(user_id: str):
 # Update the main recommendations endpoint to use hybrid approach
 @rec_bp.route("/<user_id>/improved", methods=["GET"])
 @with_resolved_user_id
-def get_improved_recommendations(user_id: int, original_user_id: str = None):
+def get_improved_recommendations(user_id: int):
     """Get improved recommendations using database-based hybrid approach"""
     try:
         limit = int(request.args.get('limit', 20))

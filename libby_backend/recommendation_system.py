@@ -123,6 +123,7 @@ class UserProfile:
     user_id: str
     email: str
     selected_genres: List[str]
+    clerk_user_id: Optional[str] = None
     reading_history: List[int] = None
     wishlist: List[int] = None
     search_history: List[str] = None
@@ -469,30 +470,41 @@ class EnhancedBookRecommendationEngine:
             conn = get_db_connection()
             if not conn:
                 return []
-                
-            with conn.cursor() as cursor:
-                cursor.execute('''
-                    SELECT book_id, title, author, genre, description, cover_image_url, 
+
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT book_id, title, author, genre, description, cover_image_url,
                            rating, publication_date, pages, language, isbn
-                    FROM books 
+                    FROM books
                     WHERE title IS NOT NULL AND author IS NOT NULL
                     ORDER BY rating DESC NULLS LAST, book_id
                     LIMIT %s
-                ''', (limit,))
-                
-                books = []
-                for row in cursor.fetchall():
-                    book = Book(
-                        id=row[0], title=row[1], author=row[2], genre=row[3],
-                        description=row[4], cover_image_url=row[5], rating=row[6],
-                        publication_date=str(row[7]) if row[7] else None,
-                        pages=row[8], language=row[9], isbn=row[10]
-                    )
-                    books.append(book)
-                
-                conn.close()
-                return books
-                
+                """, (limit,))
+                rows = cursor.fetchall()
+
+            books = []
+            for row in rows:
+                try:
+                    books.append(Book(
+                        id=row["book_id"],
+                        title=row.get("title") or "",
+                        author=row.get("author") or "Unknown Author",
+                        genre=row.get("genre"),
+                        description=row.get("description"),
+                        cover_image_url=row.get("cover_image_url"),
+                        rating=safe_float_conversion(row.get("rating")),
+                        publication_date=str(row.get("publication_date")) if row.get("publication_date") else None,
+                        pages=row.get("pages"),
+                        language=row.get("language"),
+                        isbn=row.get("isbn")
+                    ))
+                except Exception:
+                    # Skip malformed rows but continue processing
+                    continue
+
+            conn.close()
+            return books
+
         except Exception as e:
             logger.error(f"Error getting all books: {e}")
             return []
@@ -503,7 +515,6 @@ class EnhancedBookRecommendationEngine:
             if exclude_ids is None:
                 exclude_ids = []
 
-            # Get synonyms for the target genre
             search_terms = [target_genre.lower()]
             for main_genre, synonyms in self.genre_synonyms.items():
                 if target_genre.lower() in main_genre or main_genre in target_genre.lower():
@@ -515,62 +526,57 @@ class EnhancedBookRecommendationEngine:
                 return []
 
             books: List[Book] = []
-            with conn.cursor() as cursor:
+            # use RealDictCursor so row access by keys is safe
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 for term in set(search_terms):
-                    exclude_clause = ""
                     params = [f"%{term}%"]
-
+                    exclude_clause = ""
                     if exclude_ids:
-                        placeholders = ','.join(['%s'] * len(exclude_ids))
+                        placeholders = ",".join(["%s"] * len(exclude_ids))
                         exclude_clause = f"AND book_id NOT IN ({placeholders})"
                         params.extend(exclude_ids)
-
                     params.append(limit)
 
                     query = f"""
-                        SELECT book_id, title, author, genre, description, cover_image_url, 
+                        SELECT book_id, title, author, genre, description, cover_image_url,
                                rating, publication_date, pages, language, isbn
-                        FROM books 
+                        FROM books
                         WHERE LOWER(genre) LIKE %s {exclude_clause}
-                        AND title IS NOT NULL
-                        AND author IS NOT NULL
+                          AND title IS NOT NULL
+                          AND author IS NOT NULL
                         ORDER BY rating DESC NULLS LAST, book_id
                         LIMIT %s
                     """
-
                     cursor.execute(query, params)
                     rows = cursor.fetchall()
 
                     for row in rows:
-                        try:
-                            book_id = row[0]
-                            if book_id in (exclude_ids or []):
-                                continue
-
-                            book = Book(
-                                id=book_id,
-                                title=row[1] or '',
-                                author=row[2] or 'Unknown Author',
-                                genre=row[3],
-                                description=row[4],
-                                cover_image_url=row[5],
-                                rating=safe_float_conversion(row[6]),
-                                publication_date=str(row[7]) if row[7] else None,
-                                pages=row[8],
-                                language=row[9],
-                                isbn=row[10]
-                            )
-                            books.append(book)
-                            exclude_ids.append(book_id)
-                        except Exception as e:
-                            logger.error(f"Error creating book object in advanced genre search: {e}")
+                        book_id = row.get("book_id")
+                        if not book_id:
                             continue
+                        if book_id in exclude_ids:
+                            continue
+
+                        books.append(Book(
+                            id=book_id,
+                            title=row.get("title") or "",
+                            author=row.get("author") or "Unknown Author",
+                            genre=row.get("genre"),
+                            description=row.get("description"),
+                            cover_image_url=row.get("cover_image_url"),
+                            rating=safe_float_conversion(row.get("rating")),
+                            publication_date=str(row.get("publication_date")) if row.get("publication_date") else None,
+                            pages=row.get("pages"),
+                            language=row.get("language"),
+                            isbn=row.get("isbn")
+                        ))
+                        exclude_ids.append(book_id)
 
                     if len(books) >= limit:
                         break
 
             conn.close()
-            logger.info(f"Advanced genre search for '{target_genre}' returned {len(books)} books")
+            logger.info(f"Advanced genre search for '{target_genre}' returned {len(books[:limit])} books")
             return books[:limit]
 
         except Exception as e:
@@ -580,28 +586,30 @@ class EnhancedBookRecommendationEngine:
     def get_books_by_author(self, author_name: str, limit: int = 10, exclude_ids: List[int] = None) -> List[Book]:
         """Get books by a specific author"""
         try:
-            if exclude_ids is None:
-                exclude_ids = []
-                
+            exclude_ids = exclude_ids or []
             conn = get_db_connection()
             if not conn:
                 return []
-                
+
             books = []
             with conn.cursor() as cursor:
+                params = [f'%{author_name.lower()}%']
                 exclude_clause = ""
                 if exclude_ids:
-                    exclude_clause = f"AND id NOT IN ({','.join(map(str, exclude_ids))})"
-                
-                cursor.execute(f'''
-                    SELECT book_id, title, author, genre, description, cover_image_url, 
+                    placeholders = ",".join(["%s"] * len(exclude_ids))
+                    exclude_clause = f"AND book_id NOT IN ({placeholders})"
+                    params.extend(exclude_ids)
+                params.append(limit)
+
+                cursor.execute(f"""
+                    SELECT book_id, title, author, genre, description, cover_image_url,
                            rating, publication_date, pages, language, isbn
-                    FROM books 
+                    FROM books
                     WHERE LOWER(author) LIKE %s {exclude_clause}
                     ORDER BY rating DESC NULLS LAST
                     LIMIT %s
-                ''', (f'%{author_name.lower()}%', limit))
-                
+                """, params)
+
                 for row in cursor.fetchall():
                     book = Book(
                         id=row[0], title=row[1], author=row[2], genre=row[3],
@@ -610,35 +618,35 @@ class EnhancedBookRecommendationEngine:
                         pages=row[8], language=row[9], isbn=row[10]
                     )
                     books.append(book)
-                    
+
             conn.close()
             return books
-                
+
         except Exception as e:
             logger.error(f"Error getting books by author: {e}")
             return []
     
-    def record_user_interaction(self, user_id: str, book_id: int, interaction_type: str, weight: float = 1.0, rating: float = None):
-        """Enhanced interaction recording with rating support"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
+    # def record_user_interaction(self, user_id: str, book_id: int, interaction_type: str, weight: float = 1.0, rating: float = None):
+    #     """Enhanced interaction recording with rating support"""
+    #     try:
+    #         conn = sqlite3.connect(self.db_path)
+    #         cursor = conn.cursor()
             
-            cursor.execute('''
-                INSERT INTO user_interactions (user_id, book_id, interaction_type, weight, rating)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (user_id, book_id, interaction_type, weight, rating))
+    #         cursor.execute('''
+    #             INSERT INTO user_interactions (user_id, book_id, interaction_type, weight, rating)
+    #             VALUES (?, ?, ?, ?, ?)
+    #         ''', (user_id, book_id, interaction_type, weight, rating))
             
-            conn.commit()
-            conn.close()
+    #         conn.commit()
+    #         conn.close()
             
-            # Update user preferences based on interaction
-            self._update_user_preferences(user_id, book_id, interaction_type, weight)
+    #         # Update user preferences based on interaction
+    #         self._update_user_preferences(user_id, book_id, interaction_type, weight)
             
-            logger.info(f"Enhanced interaction recorded: {user_id} -> {book_id} ({interaction_type}, weight: {weight})")
+    #         logger.info(f"Enhanced interaction recorded: {user_id} -> {book_id} ({interaction_type}, weight: {weight})")
             
-        except Exception as e:
-            logger.error(f"Error recording enhanced interaction: {e}")
+    #     except Exception as e:
+    #         logger.error(f"Error recording enhanced interaction: {e}")
 
     def record_interaction(self, user_id: Optional[int], book_id: int, interaction_type: str, rating: float = None, clerk_user_id: Optional[str] = None) -> Dict:
         """
@@ -718,7 +726,7 @@ class EnhancedBookRecommendationEngine:
             
             # Get user interactions with ratings
             cursor.execute('''
-                SELECT book_id, interaction_type, weight, timestamp, rating
+                SELECT book_id, interaction_type, timestamp, rating
                 FROM user_interactions
                 WHERE user_id = ?
                 ORDER BY timestamp DESC
@@ -763,10 +771,13 @@ class EnhancedBookRecommendationEngine:
                     if book.author and interaction_type in ['wishlist_add', 'like'] and book.author not in favorite_authors:
                         favorite_authors.append(book.author)
             
+            # treat non-numeric user_id as a Clerk ID
+            clerk_id = None if str(user_id).isdigit() else str(user_id)
             profile = UserProfile(
                 user_id=user_id,
                 email=email or f"user_{user_id}@example.com",
                 selected_genres=selected_genres or [],
+                clerk_user_id=clerk_id,
                 reading_history=reading_history,
                 wishlist=wishlist,
                 interaction_weights=dict(interaction_weights),
@@ -819,10 +830,12 @@ class EnhancedBookRecommendationEngine:
                 if book and book.genre:
                     interaction_weights[book.genre.lower()] += weight
             
+            clerk_id = None if str(user_id).isdigit() else str(user_id)
             profile = UserProfile(
                 user_id=user_id,
                 email=email or f"user_{user_id}@example.com",
                 selected_genres=selected_genres or [],
+                clerk_user_id=clerk_id,
                 reading_history=reading_history,
                 wishlist=wishlist,
                 interaction_weights=dict(interaction_weights)
@@ -1084,46 +1097,25 @@ class EnhancedBookRecommendationEngine:
     def collaborative_filtering_recommendations(self, profile: UserProfile, limit: int = 10) -> Tuple[List[Book], List[str]]:
         """Generate collaborative filtering recommendations using the existing PostgreSQL function."""
         try:
-            clerk_user_id = getattr(profile, 'clerk_user_id', None)
-            user_id = None
-
-            # Try to get numeric user_id from profile
-            try:
-                user_id = int(profile.user_id) if profile.user_id and str(profile.user_id).isdigit() else None
-            except (ValueError, TypeError):
-                user_id = None
-
-            # Call the existing PostgreSQL helper which returns (rows, reasons)
             rows, reasons = collaborative_filtering_recommendations_pg(
-                clerk_user_id=clerk_user_id,
-                user_id=user_id,
+                clerk_user_id=getattr(profile, 'clerk_user_id', None),
+                user_id=int(profile.user_id) if getattr(profile,'user_id',None) and str(profile.user_id).isdigit() else None,
                 limit=limit
             )
-
-            # Convert rows to Book objects
-            books: List[Book] = []
+            books = []
             for row in (rows or []):
-                try:
-                    book = Book(
-                        id=row.get('book_id') or row.get('id'),
-                        title=row.get('title', '') or '',
-                        author=row.get('author', 'Unknown Author') or 'Unknown Author',
-                        genre=row.get('genre'),
-                        cover_image_url=row.get('cover_image_url') or row.get('coverurl'),
-                        rating=safe_float_conversion(row.get('rating'))
-                    )
-                    # preserve score if present
-                    try:
-                        book.collaborative_score = row.get('score')
-                    except Exception:
-                        pass
-                    books.append(book)
-                except Exception as e:
-                    logger.error(f"Error creating book from collaborative row: {e}")
-                    continue
-
+                b = Book(
+                    id=row.get('book_id') or row.get('id'),
+                    title=row.get('title') or '',
+                    author=row.get('author') or 'Unknown Author',
+                    genre=row.get('genre'),
+                    cover_image_url=row.get('cover_image_url') or row.get('coverurl'),
+                    rating=safe_float_conversion(row.get('rating'))
+                )
+                # make it visible to hybrid sorter
+                b.similarity_score = (row.get('score') or 0.0)
+                books.append(b)
             return books, reasons or []
-
         except Exception as e:
             logger.error(f"Error in collaborative filtering: {e}")
             return [], []
@@ -1225,6 +1217,11 @@ class EnhancedBookRecommendationEngine:
     def hybrid_recommendations_enhanced(self, profile: UserProfile, total_limit: int = 20) -> RecommendationResult:
         """Enhanced hybrid recommendations with better book data integration"""
         try:
+            # hydrate profile from Postgres if clerk_user_id present
+            try:
+                self._hydrate_profile_from_db(profile)
+            except Exception:
+                pass
             all_recommendations = []
             all_reasons = []
             contributions = {}
@@ -1265,14 +1262,22 @@ class EnhancedBookRecommendationEngine:
             contributions['diversity'] = len(diversity_books)
 
             # ---------- dedupe + quality
+            # normalize missing scores so no source is handicapped
+            for b in all_recommendations:
+                if not hasattr(b, "similarity_score") or b.similarity_score is None:
+                    # give a tiny base so non-scored books don't all tie at 0
+                    b.similarity_score = 0.01
+
             seen = set(); final = []
             for b in sorted(all_recommendations, key=lambda x: getattr(x, 'similarity_score', 0), reverse=True):
                 if b.id not in seen:
                     final.append(b); seen.add(b.id)
 
             quality = [b for b in final if (getattr(b, 'rating', None) is None) or (b.rating >= profile.preferred_rating_threshold)]
-            if len(quality) < total_limit * 0.6:
-                extra = self.get_quality_trending_books(total_limit - len(quality), [x.id for x in quality], profile)
+            # If too many items are dropped by quality filtering, top-up from trending
+            needed = total_limit - len(quality)
+            if needed > 0:
+                extra = self.get_quality_trending_books(needed, [x.id for x in quality], profile)
                 quality.extend(extra)
 
             final = quality[:total_limit]
@@ -1546,6 +1551,19 @@ class EnhancedBookRecommendationEngine:
         except Exception as e:
             logger.error(f"Error calculating enhanced confidence: {e}")
             return 0.7
+
+    def _hydrate_profile_from_db(self, profile: UserProfile):
+        """Fill missing selected_genres and interaction_weights from Postgres user_interests if clerk_user_id is present."""
+        try:
+            if profile and getattr(profile, 'clerk_user_id', None):
+                if not profile.selected_genres or not profile.interaction_weights:
+                    sel, w = load_interests_for_profile(profile.clerk_user_id)
+                    if not profile.selected_genres:
+                        profile.selected_genres = sel
+                    if not profile.interaction_weights:
+                        profile.interaction_weights = w
+        except Exception as e:
+            logger.debug(f"_hydrate_profile_from_db failed: {e}")
     
     def get_recommendations_for_user_enhanced(self, user_id: str, email: str = None, 
                                            selected_genres: List[str] = None, 
@@ -1623,6 +1641,11 @@ class EnhancedBookRecommendationEngine:
     def hybrid_recommendations(self, profile: UserProfile, total_limit: int = 20) -> RecommendationResult:
         """Generate hybrid recommendations combining multiple algorithms"""
         try:
+            # hydrate profile from Postgres if clerk_user_id present
+            try:
+                self._hydrate_profile_from_db(profile)
+            except Exception:
+                pass
             all_recommendations = []
             all_reasons = []
             algorithm_contributions = {}
@@ -2087,6 +2110,31 @@ def normalize_genres(user_genres):
     
     logger.info(f"Normalized genres: {user_genres} -> {normalized}")
     return normalized
+
+
+def load_interests_for_profile(clerk_user_id: str):
+    """Return (selected_genres:list[str], weights:dict[genre->score]) from user_interests."""
+    conn = get_db_connection()
+    if not conn:
+        return [], {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT LOWER(genre), COUNT(*) AS cnt
+                FROM public.user_interests
+                WHERE clerk_user_id = %s
+                GROUP BY 1
+                ORDER BY cnt DESC
+            """, (clerk_user_id,))
+            rows = cur.fetchall()
+            selected = [r[0] for r in rows]
+            weights  = {r[0]: float(r[1]) for r in rows}
+            return selected, weights
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 # Simple function for basic Flask integration
 def recommend_books_for_user(user_id, limit=20):
