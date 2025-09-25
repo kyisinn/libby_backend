@@ -6,9 +6,7 @@ from flask_cors import CORS
 from libby_backend.cache import init_cache
 from libby_backend.blueprints.clerk.routes import clerk_bp
 
-# Recreate user_logins table on startup to ensure it's fresh
-from libby_backend.database import recreate_user_logins_table
-recreate_user_logins_table()
+
 
 
 # =============================================================================

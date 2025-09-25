@@ -962,35 +962,3 @@ def count_recommendations_db(user_id: int | None = None, clerk_user_id: str | No
 
 
 
-#onetime timestamp fix
-
-def recreate_user_logins_table():
-    """
-    Drop and recreate the user_logins table with proper schema.
-    WARNING: This will delete all existing login history.
-    Run this only if you are okay with losing previous data.
-    """
-    conn = get_db_connection()
-    if not conn:
-        print("❌ No DB connection.")
-        return
-    try:
-        with conn.cursor() as cur:
-            # Drop existing table
-            cur.execute("DROP TABLE IF EXISTS user_logins;")
-
-            # Recreate table with correct schema
-            cur.execute("""
-                CREATE TABLE user_logins (
-                    id SERIAL PRIMARY KEY,
-                    clerk_user_id TEXT NOT NULL,
-                    login_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-
-            conn.commit()
-            print("✅ user_logins table recreated successfully with TIMESTAMPTZ login_at")
-    except Exception as e:
-        print("⚠️ Could not recreate user_logins table:", e)
-    finally:
-        conn.close()
