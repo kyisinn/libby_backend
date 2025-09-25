@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from flask_cors import cross_origin, CORS
 from libby_backend.database import get_db_connection, save_user_interests_db
-import hashlib
+
 
 # Register blueprint with URL prefix
 profile_bp = Blueprint("profile", __name__, url_prefix="/api/profile")
@@ -13,7 +13,7 @@ CORS(profile_bp, origins=["http://localhost:3000", "http://127.0.0.1:3000", "htt
     allow_headers=["Content-Type", "Authorization"]) 
 
 from flask import Blueprint, request, jsonify
-import logging
+
 
 # Import centralized user ID resolver
 from libby_backend.utils.user_resolver import resolve_user_id, resolve_user_id_from_request
