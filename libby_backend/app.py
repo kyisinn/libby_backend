@@ -4,6 +4,7 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
 from libby_backend.cache import init_cache
+from libby_backend.blueprints.clerk.routes import clerk_bp
 
 
 # =============================================================================
@@ -13,6 +14,8 @@ from libby_backend.config import Config
 
 app = Flask(__name__)
 app.config.from_object(Config)
+
+app.register_blueprint(clerk_bp)
 
 ALLOWED_ORIGINS = [
     "https://libby-bot.vercel.app",   

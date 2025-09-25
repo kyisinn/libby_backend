@@ -5,7 +5,7 @@ from libby_backend.database import get_db_connection, save_user_interests_db
 
 # Register blueprint with URL prefix
 profile_bp = Blueprint("profile", __name__, url_prefix="/api/profile")
-print("✅ profile.routes.py is loading...")  # Confirm it's imported
+
 
 # Apply per-blueprint CORS so we don't need to decorate every route manually
 CORS(profile_bp, origins=["http://localhost:3000", "http://127.0.0.1:3000", "https://libby-bot.vercel.app"],
