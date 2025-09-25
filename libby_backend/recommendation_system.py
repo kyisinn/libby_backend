@@ -1217,83 +1217,107 @@ class EnhancedBookRecommendationEngine:
     def hybrid_recommendations_enhanced(self, profile: UserProfile, total_limit: int = 20) -> RecommendationResult:
         """Enhanced hybrid recommendations with better book data integration"""
         try:
-            # hydrate profile from Postgres if clerk_user_id present
+            # ---------- hydrate from DB (keep yours)
             try:
                 self._hydrate_profile_from_db(profile)
             except Exception:
                 pass
-            all_recommendations = []
+
             all_reasons = []
-            contributions = {}
+            # collect per-source results so we can fuse/credit correctly
+            SOURCE_BOOST = {"content": 0.6, "author": 0.4, "collab": 1.0, "trending": 0.25, "diversity": 0.15}
+            per_source = {}
 
             # ---------- content (35%)
             content_limit = int(total_limit * self.weights['content_based'])
             content_books, content_reasons = self.content_based_recommendations_enhanced(profile, content_limit)
-            all_recommendations.extend(content_books); all_reasons += content_reasons
-            contributions['content'] = len(content_books)
+            per_source["content"] = content_books; all_reasons += content_reasons
 
             # ---------- author (15%)
             author_limit = int(total_limit * self.weights['author_based'])
             author_books, author_reasons = self.author_based_recommendations(profile, author_limit)
-            author_books = [b for b in author_books if b.id not in {x.id for x in all_recommendations}]
-            all_recommendations.extend(author_books); all_reasons += author_reasons
-            contributions['author'] = len(author_books)
+            # leave dedupe for the fusion stage
+            per_source["author"] = author_books; all_reasons += author_reasons
 
             # ---------- collaborative (25%)
             collab_limit = int(total_limit * self.weights['collaborative'])
             collab_books, collab_reasons = self.collaborative_filtering_recommendations(profile, collab_limit)
-            collab_books = [b for b in collab_books if b.id not in {x.id for x in all_recommendations}]
-            all_recommendations.extend(collab_books); all_reasons += collab_reasons
-            contributions['collab'] = len(collab_books)
+            per_source["collab"] = collab_books; all_reasons += collab_reasons
 
             # ---------- trending (20%)
+            already_ids = [b.id for src in ("content","author","collab") for b in per_source.get(src, [])]
+            exclude_ids = (already_ids or []) + (profile.reading_history or []) + (profile.wishlist or [])
             trending_limit = int(total_limit * self.weights['trending'])
-            exclude_ids = [b.id for b in all_recommendations] + (profile.reading_history or []) + (profile.wishlist or [])
             trending_books = self.get_quality_trending_books(trending_limit, exclude_ids, profile)
-            all_recommendations.extend(trending_books)
+            per_source["trending"] = trending_books
             if trending_books: all_reasons.append("High-rated trending books matching your preferences")
-            contributions['trending'] = len(trending_books)
 
             # ---------- diversity (5%)
             diversity_limit = int(total_limit * self.weights['diversity'])
-            diversity_books = self.get_diversity_books(profile, diversity_limit, [b.id for b in all_recommendations])
-            all_recommendations.extend(diversity_books)
+            diversity_books = self.get_diversity_books(profile, diversity_limit, [b.id for b in trending_books] + already_ids)
+            per_source["diversity"] = diversity_books
             if diversity_books: all_reasons.append("Diverse books from unexplored genres")
-            contributions['diversity'] = len(diversity_books)
 
-            # ---------- dedupe + quality
-            # normalize missing scores so no source is handicapped
-            for b in all_recommendations:
-                if not hasattr(b, "similarity_score") or b.similarity_score is None:
-                    # give a tiny base so non-scored books don't all tie at 0
-                    b.similarity_score = 0.01
+            # ---------- fuse, score, dedupe
+            def _canon_id(v):
+                try: return int(v)
+                except Exception: return str(v)
 
-            seen = set(); final = []
-            for b in sorted(all_recommendations, key=lambda x: getattr(x, 'similarity_score', 0), reverse=True):
-                if b.id not in seen:
-                    final.append(b); seen.add(b.id)
+            bookmap = {}  # bid -> dict(book, score, srcs:set)
+            for src, books in per_source.items():
+                for b in books:
+                    # normalize missing scores so no source is handicapped
+                    if not hasattr(b, "similarity_score") or b.similarity_score is None:
+                        b.similarity_score = 0.01
+                    bid = _canon_id(b.id)
+                    entry = bookmap.get(bid)
+                    if not entry:
+                        bookmap[bid] = {"book": b, "score": float(b.similarity_score) + SOURCE_BOOST.get(src, 0.0), "srcs": {src}}
+                    else:
+                        # keep best intrinsic score, add boost for additional source
+                        entry["score"] = max(entry["score"], float(b.similarity_score))
+                        entry["score"] += SOURCE_BOOST.get(src, 0.0)
+                        entry["srcs"].add(src)
 
+            # slight guaranteed visibility for CF while dataset is small
+            if per_source.get("collab"):
+                for b in sorted(per_source["collab"], key=lambda x: getattr(x, "similarity_score", 0), reverse=True)[:max(2, int(total_limit*0.2))]:
+                    bid = _canon_id(b.id)
+                    if bid in bookmap:
+                        bookmap[bid]["score"] += 0.5
+
+            # rank by fused score
+            ranked = sorted(bookmap.values(), key=lambda e: e["score"], reverse=True)
+            final = [e["book"] for e in ranked]
+
+            # ---------- quality pass + top-up
             quality = [b for b in final if (getattr(b, 'rating', None) is None) or (b.rating >= profile.preferred_rating_threshold)]
-            # If too many items are dropped by quality filtering, top-up from trending
             needed = total_limit - len(quality)
             if needed > 0:
                 extra = self.get_quality_trending_books(needed, [x.id for x in quality], profile)
                 quality.extend(extra)
-
             final = quality[:total_limit]
 
-            # ---------- label & confidence (use DB counts)
+            # ---------- contributions computed on the CHOSEN set
+            contributions = {"content":0,"author":0,"collab":0,"trending":0,"diversity":0}
+            chosen_ids = {_canon_id(b.id) for b in final}
+            for bid in chosen_ids:
+                srcs = bookmap.get(bid, {}).get("srcs", set())
+                for s in srcs:
+                    contributions[s] = contributions.get(s, 0) + 1
+
+            # ---------- label & confidence
             i_count = count_user_interactions(getattr(profile, 'clerk_user_id', '') or "")
             u_count = count_user_interests(getattr(profile, 'clerk_user_id', '') or "")
             confidence = self._calculate_enhanced_confidence(profile, contributions, total_limit)
+            algo_label = "Database Hybrid (Collaborative + Content + Trending)" if (i_count > 0 or u_count > 0) else "Trending (New User)"
 
-            if i_count > 0 or u_count > 0:
-                algo_label = "Database Hybrid (Collaborative + Content + Trending)"
-            else:
-                algo_label = "Trending (New User)"
-
-            # Primary for telemetry
-            primary = max(contributions.items(), key=lambda x: x[1])[0] if contributions else "trending"
+            # ---------- ensure cover URLs are usable (http -> https)
+            import re
+            for b in final:
+                url = getattr(b, "cover_image_url", None)
+                if url:
+                    b.cover_image_url = re.sub(r"(?i)^http://", "https://", url.strip())
 
             return RecommendationResult(
                 books=final,
@@ -1301,7 +1325,6 @@ class EnhancedBookRecommendationEngine:
                 confidence_score=confidence,
                 reasons=list(set(all_reasons)),
                 generated_at=datetime.now(),
-                # add these two fields to your dataclass if not present; else return them alongside in the route
                 contributions=contributions,
                 interaction_count=i_count,
             )
@@ -1321,61 +1344,80 @@ class EnhancedBookRecommendationEngine:
     
     def content_based_recommendations_enhanced(self, profile: UserProfile, limit: int = 15) -> Tuple[List[Book], List[str]]:
         """Enhanced content-based recommendations using actual book data"""
-        recommendations = []
-        reasons = []
-        exclude_ids = profile.reading_history + profile.wishlist
-        
+        recommendations, reasons = [], []
+        exclude_ids = (profile.reading_history or []) + (profile.wishlist or [])
+
         try:
-            # Weight genres based on user preferences and interactions
+            # If FE hasn't filled genres yet, pull from DB here (no new helper)
+            if not getattr(profile, "selected_genres", None) and getattr(profile, "clerk_user_id", None):
+                conn = get_db_connection()
+                if conn:
+                    from psycopg2.extras import RealDictCursor
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        # prefer numeric mapping if present in table; otherwise fall back to clerk id
+                        cur.execute("""
+                            SELECT COALESCE(CAST(user_id AS TEXT), clerk_user_id) AS key_col FROM user_interests
+                            WHERE clerk_user_id = %s OR CAST(user_id AS TEXT) = %s
+                            LIMIT 1
+                        """, (profile.clerk_user_id, profile.clerk_user_id))
+                        # then fetch genres for that identity
+                        cur.execute("""
+                            SELECT LOWER(genre) AS genre, COUNT(*) AS cnt
+                            FROM user_interests
+                            WHERE clerk_user_id = %s OR CAST(user_id AS TEXT) = %s
+                            GROUP BY 1 ORDER BY cnt DESC
+                        """, (profile.clerk_user_id, profile.clerk_user_id))
+                        rows = cur.fetchall()
+                        if rows:
+                            profile.selected_genres = [r["genre"] for r in rows]
+                            profile.interaction_weights = {r["genre"]: float(r["cnt"]) for r in rows}
+                    conn.close()
+
+            # Weight genres
             genre_scores = {}
-            
-            # Base scores from selected genres
-            for genre in profile.selected_genres:
+            for genre in (profile.selected_genres or []):
                 genre_scores[genre.lower()] = 1.0
-            
-            # Boost scores from interaction history
-            for genre, weight in profile.interaction_weights.items():
-                genre_scores[genre.lower()] = genre_scores.get(genre.lower(), 0) + weight * 0.5
-            
-            # If no genres, use some defaults
+            for genre, weight in (profile.interaction_weights or {}).items():
+                genre_scores[genre.lower()] = genre_scores.get(genre.lower(), 0) + float(weight) * 0.5
+
             if not genre_scores:
-                genre_scores = {
-                    'fiction': 0.8, 'science fiction': 0.7, 'fantasy': 0.7,
-                    'mystery': 0.6, 'romance': 0.6, 'biography': 0.5
-                }
-            
-            # Sort genres by score
+                genre_scores = {'science':0.7,'technology':0.7,'business':0.6,'art':0.5}
+
             sorted_genres = sorted(genre_scores.items(), key=lambda x: x[1], reverse=True)
-            
-            # Fetch books from top genres using enhanced search
-            books_per_genre = max(1, limit // len(sorted_genres)) if sorted_genres else limit
-            
-            for genre, score in sorted_genres[:5]:  # Top 5 genres
+            books_per_genre = max(1, limit // max(1,len(sorted_genres)))
+
+            for genre, base in sorted_genres[:5]:
+                # inline synonym expansion for your catalog labels
+                extra_terms = []
+                if genre in ("selfhelp","self-help","self help"):
+                    extra_terms = ["conduct of life","personal development","personal growth","self improvement","self-management","motivation"]
+                # main query
                 genre_books = self.get_books_by_advanced_genre_search(genre, books_per_genre * 2, exclude_ids)
-                
+                # try a couple of alternates if needed
+                if len(genre_books) < books_per_genre and extra_terms:
+                    for t in extra_terms:
+                        if len(genre_books) >= books_per_genre*2: break
+                        genre_books += self.get_books_by_advanced_genre_search(t, books_per_genre, exclude_ids)
+
                 for book in genre_books:
                     if book.id not in exclude_ids:
-                        # Calculate enhanced content score
-                        book.similarity_score = self._calculate_enhanced_content_score(book, profile, score)
+                        book.similarity_score = self._calculate_enhanced_content_score(book, profile, base)
                         recommendations.append(book)
                         exclude_ids.append(book.id)
-                        
-                if recommendations:
+
+                if genre_books:
                     reasons.append(f"Based on your interest in {genre} books")
-                    
                 if len(recommendations) >= limit:
                     break
-            
-            # Sort by score and take top recommendations
+
             recommendations.sort(key=lambda x: getattr(x, 'similarity_score', 0), reverse=True)
             recommendations = recommendations[:limit]
-            
             if recommendations:
-                reasons.append(f"Personalized content matching your reading preferences")
-            
+                reasons.append("Personalized content matching your reading preferences")
+
         except Exception as e:
             logger.error(f"Error in enhanced content-based recommendations: {e}")
-        
+
         return recommendations, reasons
     
     def _calculate_enhanced_content_score(self, book: Book, profile: UserProfile, genre_weight: float = 1.0) -> float:

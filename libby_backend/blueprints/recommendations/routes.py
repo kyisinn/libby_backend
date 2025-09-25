@@ -8,6 +8,8 @@ from typing import List, Optional, Dict, Any
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from libby_backend.database import count_user_interactions, count_user_interests
+import re
+from urllib.parse import quote_plus
 
 # Import centralized user ID resolver
 from libby_backend.utils.user_resolver import resolve_user_id, with_resolved_user_id, resolve_user_id_from_request
@@ -323,51 +325,99 @@ def clear_user_cache(user_id: str):
             'error': str(e)
         })
     
-
+def _to_https(u: str | None) -> str | None:
+    if not u:
+        return None
+    return re.sub(r'(?i)^http://', 'https://', u.strip())
 
 
 @rec_bp.route("/<user_id>/improve", methods=["GET"], endpoint="improve_recs")
 def get_improved_recommendations_with_fallbacks(user_id: str):
-    """Improved recommendations + DB counts for UI label.
-
-    This handler is intentionally lightweight: it builds a minimal profile
-    from Postgres (so the hybrid engine can run), calls the enhanced hybrid
-    method, and returns DB-driven telemetry (interaction & interest counts)
-    for UI labeling.
-    """
     try:
         limit = int(request.args.get("limit", 20))
 
-        # 1) Always build a real profile for the Clerk id
+        # ---------- READ CACHE FIRST (fast return)
+        cache_key = f"improve_resp:{user_id}:{limit}"
+        cached = None
+        try:
+            cached = cache.get(cache_key)
+        except Exception:
+            pass
+        if cached:
+            return jsonify(cached)
+
+        # ---------- build as before
         profile = build_profile_for(user_id)
+        result  = recommendation_engine.hybrid_recommendations_enhanced(profile, limit)
 
-        # 2) Call the DB-backed hybrid (uses user_interactions + user_interests)
-        result = recommendation_engine.hybrid_recommendations_enhanced(profile, limit)
-
-        # 3) DB counts for the header
         i_count = count_user_interactions(user_id)
         u_count = count_user_interests(user_id)
+        algo_label = ("Database Hybrid (Collaborative + Content + Trending)"
+                      if (i_count > 0 or u_count > 0) else "Trending (New User)")
 
-        algo_label = (
-            "Database Hybrid (Collaborative + Content + Trending)"
-            if (i_count > 0 or u_count > 0)
-            else "Trending (New User)"
-        )
+        # ---- covers prefetch (unchanged; keeping your code)
+        from psycopg2.extras import RealDictCursor
+        import re
+        def _https(u: str | None) -> str | None:
+            if not u: return None
+            return re.sub(r'(?i)^http://', 'https://', u.strip())
 
-        # 4) Serialize books for FE
+        ids = [int(getattr(b, "id")) for b in (result.books or []) if getattr(b, "id", None)]
+        cover_by_id = {}
+        if ids:
+            try:
+                cover_key = "covers:" + ",".join(str(x) for x in sorted(ids))
+                cover_by_id = cache.get(cover_key) or {}
+            except Exception:
+                cover_by_id = {}
+
+            if not cover_by_id:
+                conn = get_db_connection()
+                if conn:
+                    try:
+                        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                            cur.execute("""
+                                SELECT book_id, cover_image_url
+                                FROM books
+                                WHERE book_id = ANY(%s)
+                            """, (ids,))
+                            for row in cur.fetchall():
+                                cover_by_id[int(row["book_id"])] = _https(row.get("cover_image_url"))
+                    finally:
+                        try: conn.close()
+                        except Exception: pass
+                try:
+                    cache.set(cover_key, cover_by_id, timeout=3600)
+                except Exception:
+                    pass
+
         books_data = []
         for book in (result.books or []):
-            cover_url = getattr(book, "cover_image_url", None) or \
-                        f"https://placehold.co/320x480/1e1f22/ffffff?text={book.title}"
+            raw = (
+                getattr(book, "cover_image_url", None)
+                or getattr(book, "coverurl", None)
+                or (cover_by_id.get(int(getattr(book, "id"))) if getattr(book, "id", None) else None)
+            )
+            raw = _https(raw)
+            if not raw:
+                isbn = getattr(book, "isbn", None)
+                if isbn:
+                    digits = re.sub(r"[^0-9Xx]", "", str(isbn))
+                    if digits:
+                        raw = f"https://covers.openlibrary.org/b/isbn/{digits}-L.jpg"
+
+            from urllib.parse import quote_plus
+            cover_url = raw or f"https://placehold.co/320x480/1e1f22/ffffff?text={quote_plus((book.title or '')[:40])}"
+
             books_data.append({
-                "id": book.id,
-                "title": book.title,
-                "author": book.author,
-                "genre": book.genre,
+                "id": getattr(book, "id", None),
+                "title": getattr(book, "title", None),
+                "author": getattr(book, "author", None),
+                "genre": getattr(book, "genre", None),
                 "description": getattr(book, "description", None),
                 "cover_image_url": cover_url,
-                "coverurl": cover_url,  # FE compatibility
-                "rating": float(book.rating) if getattr(book, "rating", None) is not None else None,
+                "coverurl": cover_url,
+                "rating": float(getattr(book, "rating", None)) if getattr(book, "rating", None) is not None else None,
                 "publication_date": getattr(book, "publication_date", None),
                 "pages": getattr(book, "pages", None),
                 "language": getattr(book, "language", None),
@@ -375,34 +425,35 @@ def get_improved_recommendations_with_fallbacks(user_id: str):
                 "similarity_score": getattr(book, "similarity_score", None),
             })
 
-        return jsonify({
+        payload = {
             "success": True,
             "books": books_data,
             "recommendations": books_data,
             "algorithm_used": algo_label,
-            "algorithmUsed": algo_label,        # alias
+            "algorithmUsed": algo_label,
             "interaction_count": i_count,
-            "interactionCount": i_count,        # alias
+            "interactionCount": i_count,
             "confidence_score": float(getattr(result, "confidence_score", 0.0)),
             "reasons": list(set(getattr(result, "reasons", []) or [])),
             "generated_at": getattr(result, "generated_at", datetime.now()).isoformat(),
             "total_count": len(books_data),
             "enhanced": True,
             "fallback_used": algo_label.lower().startswith("trending"),
-        })
+        }
+
+        # ---------- STORE in cache (short TTL)
+        try:
+            cache.set(cache_key, payload, timeout=30)   # 30s micro-cache
+        except Exception:
+            pass
+
+        return jsonify(payload)
 
     except Exception as e:
-        # Log full traceback in your logger; return structured error
         import traceback, sys
         traceback.print_exc(file=sys.stderr)
-
-        return jsonify({
-            "success": False,
-            "error": "Failed to generate recommendations",
-            "details": str(e),
-            "books": [],
-            "recommendations": [],
-        }), 500
+        return jsonify({"success": False, "error": "Failed to generate recommendations",
+                        "details": str(e), "books": [], "recommendations": []}), 500
 
 @rec_bp.route("/<user_id>/simple", methods=["GET"])
 def get_simple_test_recommendations(user_id: str):
@@ -1456,10 +1507,9 @@ def get_hybrid_recommendations_route(user_id: str):
         # Convert user_id to integer for database query
         try:
             if user_id.startswith('user_'):
-                import hashlib
-                user_id_int = int(hashlib.md5(user_id.encode()).hexdigest()[:8], 16)
+                user_id_int = resolve_user_id(user_id)
             else:
-                user_id_int = int(user_id)
+                user_id_int = user_id
         except (ValueError, TypeError):
             return jsonify({
                 'success': False,
