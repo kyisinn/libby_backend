@@ -410,6 +410,115 @@ class EnhancedBookRecommendationEngine:
                         CREATE INDEX idx_recommendations_create_at ON recommendations(create_at);
                     """)
                 
+                # Check if user_interests table exists
+                cursor.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'user_interests'
+                    )
+                """)
+                
+                user_interests_exists = cursor.fetchone()[0]
+                
+                if not user_interests_exists:
+                    cursor.execute("""
+                        CREATE TABLE user_interests (
+                            id SERIAL PRIMARY KEY,
+                            user_id TEXT NOT NULL,
+                            genre TEXT NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE (user_id, genre)
+                        )
+                    """)
+                    
+                    cursor.execute("""
+                        CREATE INDEX idx_user_interests_user_id ON user_interests(user_id);
+                    """)
+
+                # Check if user_interactions table exists
+                cursor.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'user_interactions'
+                    )
+                """)
+                
+                user_interactions_exists = cursor.fetchone()[0]
+                
+                if not user_interactions_exists:
+                    cursor.execute("""
+                        CREATE TABLE user_interactions (
+                            id SERIAL PRIMARY KEY,
+                            user_id TEXT NOT NULL,
+                            book_id INTEGER NOT NULL,
+                            interaction_type VARCHAR(50) NOT NULL,
+                            weight REAL DEFAULT 1.0,
+                            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            metadata JSONB
+                        )
+                    """)
+                    
+                    cursor.execute("""
+                        CREATE INDEX idx_user_interactions_user_id ON user_interactions(user_id);
+                        CREATE INDEX idx_user_interactions_book_id ON user_interactions(book_id);
+                        CREATE INDEX idx_user_interactions_timestamp ON user_interactions(timestamp);
+                    """)
+                
+                # Check if book_similarities table exists
+                cursor.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'book_similarities'
+                    )
+                """)
+                
+                book_similarities_exists = cursor.fetchone()[0]
+                
+                if not book_similarities_exists:
+                    cursor.execute("""
+                        CREATE TABLE book_similarities (
+                            id SERIAL PRIMARY KEY,
+                            book1_id INTEGER NOT NULL,
+                            book2_id INTEGER NOT NULL,
+                            similarity_score REAL NOT NULL,
+                            last_calculated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(book1_id, book2_id)
+                        )
+                    """)
+                    
+                    cursor.execute("""
+                        CREATE INDEX idx_similarities_book1 ON book_similarities(book1_id);
+                        CREATE INDEX idx_similarities_book2 ON book_similarities(book2_id);
+                    """)
+                    
+                # Check if book_cache table exists
+                cursor.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'book_cache'
+                    )
+                """)
+                
+                book_cache_exists = cursor.fetchone()[0]
+                
+                if not book_cache_exists:
+                    cursor.execute("""
+                        CREATE TABLE book_cache (
+                            id SERIAL PRIMARY KEY,
+                            book_id INTEGER UNIQUE NOT NULL,
+                            data JSONB NOT NULL,
+                            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    
+                    cursor.execute("""
+                        CREATE INDEX idx_book_cache_updated ON book_cache(last_updated);
+                    """)
+                
                 conn.commit()
             conn.close()
             
@@ -417,12 +526,6 @@ class EnhancedBookRecommendationEngine:
             logger.error(f"Error initializing database: {e}")
             if 'conn' in locals() and conn:
                 conn.close()
-                    preferred_genres TEXT,
-                    favorite_authors TEXT,
-                    rating_threshold REAL DEFAULT 3.0,
-                    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
             
             # Book similarity cache
             cursor.execute('''
@@ -710,12 +813,10 @@ class EnhancedBookRecommendationEngine:
             logger.error(f"Error updating user preferences: {e}")
             if 'conn' in locals() and conn:
                 conn.close()
-        else:
-            if 'conn' in locals() and conn:
-                conn.close()
-            conn.close()
         except Exception as e:
             logger.error(f"Error updating user interests: {e}")
+            if 'conn' in locals() and conn:
+                conn.close()
     
     def get_user_profile_enhanced(self, user_id: str, email: str = None, selected_genres: List[str] = None) -> UserProfile:
         """Enhanced user profile building with author preferences and rating thresholds"""
@@ -801,7 +902,7 @@ class EnhancedBookRecommendationEngine:
     def get_user_profile(self, user_id: str, email: str = None, selected_genres: List[str] = None) -> UserProfile:
         """Build user profile from interactions and preferences"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = get_db_connection()
             if not conn:
                 return []
                 
@@ -2039,7 +2140,7 @@ class EnhancedBookRecommendationEngine:
     def cleanup_old_data(self, days_to_keep: int = 90):
         """Clean up old interaction data and cache entries"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = get_db_connection()
             cursor = conn.cursor()
             
             cutoff_date = datetime.now() - timedelta(days=days_to_keep)
