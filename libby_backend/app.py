@@ -37,7 +37,7 @@ ALLOWED_ORIGINS = [
 origin_regex = re.compile(r"^https://[-a-z0-9]+\.vercel\.app$") 
 CORS(
     app,
-    resources={r"/api/*": {"origins": ALLOWED_ORIGINS}},
+    resources={r"/api/*": {"origins": ALLOWED_ORIGINS + [origin_regex]}},
     methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
     expose_headers=["Content-Length", "Content-Type"],
