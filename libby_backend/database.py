@@ -964,10 +964,11 @@ def count_recommendations_db(user_id: int | None = None, clerk_user_id: str | No
 
 #onetime timestamp fix
 
-def ensure_login_at_timestamp():
+def recreate_user_logins_table():
     """
-    Ensure the login_at column in user_logins is TIMESTAMPTZ with default CURRENT_TIMESTAMP.
-    Run this once at startup or migrations.
+    Drop and recreate the user_logins table with proper schema.
+    WARNING: This will delete all existing login history.
+    Run this only if you are okay with losing previous data.
     """
     conn = get_db_connection()
     if not conn:
@@ -975,15 +976,21 @@ def ensure_login_at_timestamp():
         return
     try:
         with conn.cursor() as cur:
+            # Drop existing table
+            cur.execute("DROP TABLE IF EXISTS user_logins;")
+
+            # Recreate table with correct schema
             cur.execute("""
-                ALTER TABLE user_logins
-                ALTER COLUMN login_at TYPE TIMESTAMPTZ
-                USING login_at::timestamp,
-                ALTER COLUMN login_at SET DEFAULT CURRENT_TIMESTAMP;
+                CREATE TABLE user_logins (
+                    id SERIAL PRIMARY KEY,
+                    clerk_user_id TEXT NOT NULL,
+                    login_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                );
             """)
+
             conn.commit()
-            print("✅ user_logins.login_at updated to TIMESTAMPTZ with default CURRENT_TIMESTAMP")
+            print("✅ user_logins table recreated successfully with TIMESTAMPTZ login_at")
     except Exception as e:
-        print("⚠️ Could not alter user_logins.login_at:", e)
+        print("⚠️ Could not recreate user_logins table:", e)
     finally:
         conn.close()
