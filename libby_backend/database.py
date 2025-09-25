@@ -898,3 +898,62 @@ def save_user_interests_db(clerk_user_id: str, interests: list[str]):
         return False
     finally:
         conn.close()
+
+
+# recommendations counting
+
+def save_recommendations_db(user_id: int | None, clerk_user_id: str | None, books: list[dict], rec_type: str = "hybrid"):
+    """
+    Save each recommended book into the recommendations table.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            # Ensure table has clerk_user_id (if not, you can skip this part)
+            cur.execute("""
+                ALTER TABLE recommendations
+                ADD COLUMN IF NOT EXISTS clerk_user_id TEXT;
+            """)
+
+            for book in books:
+                cur.execute("""
+                    INSERT INTO recommendations (user_id, clerk_user_id, book_id, recommendation_type, create_at, is_viewed)
+                    VALUES (%s, %s, %s, %s, NOW(), FALSE)
+                """, (
+                    user_id,
+                    clerk_user_id,
+                    book.get("id"),
+                    rec_type
+                ))
+        conn.commit()
+        return True
+    except Exception as e:
+        print("save_recommendations_db error:", e)
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def count_recommendations_db(user_id: int | None = None, clerk_user_id: str | None = None) -> int:
+    """
+    Count total recommendations generated for a given user.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            if clerk_user_id:
+                cur.execute("SELECT COUNT(*) FROM recommendations WHERE clerk_user_id = %s", (clerk_user_id,))
+            elif user_id:
+                cur.execute("SELECT COUNT(*) FROM recommendations WHERE user_id = %s", (user_id,))
+            else:
+                return 0
+            return cur.fetchone()[0]
+    except Exception as e:
+        print("count_recommendations_db error:", e)
+        return 0
+    finally:
+        conn.close()

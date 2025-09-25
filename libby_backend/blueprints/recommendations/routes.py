@@ -10,6 +10,7 @@ from psycopg2.extras import RealDictCursor
 from libby_backend.database import count_user_interactions, count_user_interests
 import re
 from urllib.parse import quote_plus
+from libby_backend.database import save_recommendations_db
 
 # Import centralized user ID resolver
 from libby_backend.utils.user_resolver import resolve_user_id, with_resolved_user_id, resolve_user_id_from_request
@@ -446,6 +447,17 @@ def get_improved_recommendations_with_fallbacks(user_id: str):
             cache.set(cache_key, payload, timeout=30)   # 30s micro-cache
         except Exception:
             pass
+        try:
+            save_recommendations_db(
+                user_id=None,
+                clerk_user_id=user_id,
+                books=books_data,
+                rec_type="improve"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to save recommendations log: {e}")
+
+
 
         return jsonify(payload)
 
