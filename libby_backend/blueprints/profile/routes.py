@@ -89,13 +89,19 @@ def get_recommendation_count():
         return jsonify({"error": "Missing user_id"}), 400
 
     conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT COUNT(*) FROM recommendations
-        WHERE user_id = %s;
-    """, (clerk_user_id,))
-    count = cur.fetchone()[0]
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) AS c
+                FROM recommendations
+                WHERE clerk_user_id = %s;
+            """, (clerk_user_id,))
+            row = cur.fetchone()
+            count = row["c"] if row and "c" in row else 0
+    except Exception as e:
+        print("get_recommendation_count error:", e)
+        return jsonify({"error": "Internal server error"}), 500
+    finally:
+        conn.close()
 
-    cur.close()
-    conn.close()
     return jsonify({"count": count})

@@ -1316,24 +1316,6 @@ def clear_cache():
         }), 500
 
 
-# USER INTERACTIONS
-# @rec_bp.route("/interactions/view", methods=["POST"])
-# def record_view():
-#     data = request.json
-#     user_id = data.get("user_id")
-#     book_id = data.get("book_id")
-
-#     if not user_id or not book_id:
-#         return jsonify({"error": "Missing user_id or book_id"}), 400
-
-#     result = record_user_interaction(user_id, book_id, "view")
-#     if result:
-#         return jsonify({"status": "success", "data": result}), 201
-#     else:
-#         return jsonify({"status": "error", "message": "Failed to record view"}), 500
-
-# NOTE: record_view() is commented out because record_book_click() below handles all interaction types
-# including "view", and provides more comprehensive functionality with better error handling
 
 @rec_bp.route("/interactions/click", methods=["POST", "OPTIONS"])
 def record_interaction_click():

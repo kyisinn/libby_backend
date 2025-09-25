@@ -946,12 +946,14 @@ def count_recommendations_db(user_id: int | None = None, clerk_user_id: str | No
     try:
         with conn.cursor() as cur:
             if clerk_user_id:
-                cur.execute("SELECT COUNT(*) FROM recommendations WHERE clerk_user_id = %s", (clerk_user_id,))
+                cur.execute("SELECT COUNT(*) AS c FROM recommendations WHERE clerk_user_id = %s", (clerk_user_id,))
             elif user_id:
-                cur.execute("SELECT COUNT(*) FROM recommendations WHERE user_id = %s", (user_id,))
+                cur.execute("SELECT COUNT(*) AS c FROM recommendations WHERE user_id = %s", (user_id,))
             else:
                 return 0
-            return cur.fetchone()[0]
+
+            row = cur.fetchone()
+            return row["c"] if row and "c" in row else 0
     except Exception as e:
         print("count_recommendations_db error:", e)
         return 0
