@@ -80,3 +80,22 @@ def get_interests():
     conn.close()
 
     return jsonify({"genres": genres})
+
+# routes/profile.py
+@profile_bp.get("/recommendations/count")
+def get_recommendation_count():
+    clerk_user_id = request.args.get("user_id")
+    if not clerk_user_id:
+        return jsonify({"error": "Missing user_id"}), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT COUNT(*) FROM recommendations
+        WHERE user_id = %s;
+    """, (clerk_user_id,))
+    count = cur.fetchone()[0]
+
+    cur.close()
+    conn.close()
+    return jsonify({"count": count})
