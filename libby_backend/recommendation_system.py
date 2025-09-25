@@ -1,7 +1,6 @@
 # Enhanced Book Recommendation System - Database Integrated Version
 # Provides accurate recommendations from actual book database
 
-import sqlite3
 import json
 import os
 import random
@@ -10,8 +9,6 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from collections import defaultdict, Counter
 import logging
-import os
-import random
 import math
 from decimal import Decimal
 
@@ -348,8 +345,6 @@ class EnhancedBookRecommendationEngine:
     """
     
     def __init__(self):
-        self.db_path = os.getenv('RECOMMENDATION_DB_PATH', 'recommendations.db')
-        
         # Enhanced algorithm weights
         self.weights = {
             'content_based': 0.35,
@@ -376,28 +371,52 @@ class EnhancedBookRecommendationEngine:
         self._init_database()
     
     def _init_database(self):
-        """Initialize SQLite database for storing recommendation data"""
+        """Initialize database schemas if they don't exist"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
+            conn = get_db_connection()
+            if not conn:
+                logger.error("No database connection available for initialization")
+                return
+                
+            with conn.cursor() as cursor:
+                # Check if tables exist
+                cursor.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'recommendations'
+                    )
+                """)
+                
+                recommendations_exists = cursor.fetchone()[0]
+                
+                if not recommendations_exists:
+                    cursor.execute("""
+                        CREATE TABLE recommendations (
+                            id SERIAL PRIMARY KEY,
+                            user_id TEXT NOT NULL,
+                            book_id INTEGER NOT NULL,
+                            recommendation_type VARCHAR(50) NOT NULL,
+                            create_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            is_viewed BOOLEAN DEFAULT FALSE,
+                            CONSTRAINT unique_recommendation 
+                                UNIQUE (user_id, book_id, create_at::date)
+                        )
+                    """)
+                    
+                    # Create indexes for better performance
+                    cursor.execute("""
+                        CREATE INDEX idx_recommendations_user_id ON recommendations(user_id);
+                        CREATE INDEX idx_recommendations_create_at ON recommendations(create_at);
+                    """)
+                
+                conn.commit()
+            conn.close()
             
-            # User interactions table (enhanced)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS user_interactions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT NOT NULL,
-                    book_id INTEGER NOT NULL,
-                    interaction_type TEXT NOT NULL,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    weight REAL DEFAULT 1.0,
-                    rating REAL DEFAULT NULL
-                )
-            ''')
-            
-            # User preferences table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS user_preferences (
-                    user_id TEXT PRIMARY KEY,
+        except Exception as e:
+            logger.error(f"Error initializing database: {e}")
+            if 'conn' in locals() and conn:
+                conn.close()
                     preferred_genres TEXT,
                     favorite_authors TEXT,
                     rating_threshold REAL DEFAULT 3.0,
@@ -580,55 +599,120 @@ class EnhancedBookRecommendationEngine:
     def record_user_interaction(self, clerk_user_id: str, book_id: int, interaction_type: str, weight: float = 1.0, rating: float = None):
         """Enhanced interaction recording with rating support (PostgreSQL version)"""
         try:
+            if not clerk_user_id:
+                logger.error("No user ID provided for interaction recording")
+                return
+                
             conn = get_db_connection()
             if not conn:
                 logger.error("No database connection available for recording user interaction")
                 return
+                
             with conn.cursor() as cursor:
-                # Insert into user_interactions (PostgreSQL version)
+                # First, check if this interaction already exists
+                cursor.execute(
+                    """
+                    SELECT id FROM user_interactions 
+                    WHERE clerk_user_id = %s AND book_id = %s AND interaction_type = %s 
+                    AND timestamp > %s
+                    """,
+                    (clerk_user_id, book_id, interaction_type, datetime.now() - timedelta(minutes=5))
+                )
+                
+                if cursor.fetchone():
+                    logger.info(f"Duplicate interaction prevented: {clerk_user_id} -> {book_id} ({interaction_type})")
+                    return
+                    
+                # Insert new interaction
                 timestamp = datetime.now()
                 cursor.execute(
-                    '''
-                    INSERT INTO user_interactions (user_id, clerk_user_id, book_id, interaction_type, rating, timestamp)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ''',
-                    (clerk_user_id, clerk_user_id, book_id, interaction_type, rating, timestamp)
+                    """
+                    INSERT INTO user_interactions 
+                    (clerk_user_id, book_id, interaction_type, rating, timestamp)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (clerk_user_id, book_id, interaction_type, rating, timestamp)
                 )
+                
+                interaction_id = cursor.fetchone()[0]
                 conn.commit()
-            conn.close()
-            # Update user preferences based on interaction
-            self._update_user_preferences(clerk_user_id, book_id, interaction_type, weight)
-            logger.info(f"Enhanced interaction recorded: {clerk_user_id} -> {book_id} ({interaction_type}, weight: {weight})")
+                
+                # Update user preferences based on interaction
+                self._update_user_preferences(clerk_user_id, book_id, interaction_type, weight)
+                
+                logger.info(f"Enhanced interaction recorded (ID: {interaction_id}): {clerk_user_id} -> {book_id} ({interaction_type}, weight: {weight})")
+                
         except Exception as e:
             logger.error(f"Error recording enhanced interaction: {e}")
+            if 'conn' in locals() and conn:
+                conn.close()
+        else:
+            if 'conn' in locals() and conn:
+                conn.close()
     
     def _update_user_preferences(self, clerk_user_id: str, book_id: int, interaction_type: str, weight: float):
         """Update user interests (genres) in user_interests table (PostgreSQL version)"""
         try:
             # Get book details
-            book_data = get_book_by_id_db(book_id)
-            if not book_data or not book_data.get('genre'):
+            book = get_book_by_id_db(book_id)
+            if not book or not getattr(book, 'genre', None):
                 return
-            genre = book_data.get('genre')
+                
+            genre = book.genre.lower()
             # Only update on positive interactions
-            if interaction_type not in ['wishlist_add', 'like'] or weight <= 0:
+            if interaction_type not in ['view', 'wishlist_add', 'like'] or weight <= 0:
                 return
+                
             conn = get_db_connection()
             if not conn:
                 logger.error("No database connection available for updating user interests")
                 return
+                
             with conn.cursor() as cursor:
-                # Remove all existing genres for this user
+                # Check if this genre already exists for the user
                 cursor.execute(
-                    "DELETE FROM user_interests WHERE user_id = %s",
-                    (clerk_user_id,)
-                )
-                # Insert the new genre
-                cursor.execute(
-                    "INSERT INTO user_interests (user_id, genre) VALUES (%s, %s)",
+                    """
+                    SELECT COUNT(*) 
+                    FROM user_interests 
+                    WHERE clerk_user_id = %s AND LOWER(genre) = LOWER(%s)
+                    """,
                     (clerk_user_id, genre)
                 )
+                
+                exists = cursor.fetchone()[0] > 0
+                
+                if not exists:
+                    # Insert the new genre if it doesn't exist
+                    cursor.execute(
+                        """
+                        INSERT INTO user_interests (clerk_user_id, genre, weight, last_updated) 
+                        VALUES (%s, %s, %s, NOW())
+                        """,
+                        (clerk_user_id, genre, weight)
+                    )
+                else:
+                    # Update the weight if the genre exists
+                    cursor.execute(
+                        """
+                        UPDATE user_interests 
+                        SET weight = weight + %s, 
+                            last_updated = NOW() 
+                        WHERE clerk_user_id = %s AND LOWER(genre) = LOWER(%s)
+                        """,
+                        (weight, clerk_user_id, genre)
+                    )
+                    
                 conn.commit()
+                logger.info(f"Updated user preferences for {clerk_user_id}: {genre} (weight: {weight})")
+                
+        except Exception as e:
+            logger.error(f"Error updating user preferences: {e}")
+            if 'conn' in locals() and conn:
+                conn.close()
+        else:
+            if 'conn' in locals() and conn:
+                conn.close()
             conn.close()
         except Exception as e:
             logger.error(f"Error updating user interests: {e}")
@@ -636,18 +720,23 @@ class EnhancedBookRecommendationEngine:
     def get_user_profile_enhanced(self, user_id: str, email: str = None, selected_genres: List[str] = None) -> UserProfile:
         """Enhanced user profile building with author preferences and rating thresholds"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Get user interactions with ratings
-            cursor.execute('''
-                SELECT book_id, interaction_type, weight, timestamp, rating
-                FROM user_interactions
-                WHERE user_id = ?
-                ORDER BY timestamp DESC
-            ''', (user_id,))
-            
-            interactions = cursor.fetchall()
+            conn = get_db_connection()
+            if not conn:
+                logger.error("No database connection available for getting user profile")
+                return UserProfile(user_id=user_id, email=email or "", selected_genres=selected_genres or [])
+                
+            with conn.cursor() as cursor:
+                # Get user interactions with ratings
+                cursor.execute("""
+                    SELECT book_id, interaction_type, 
+                           COALESCE(rating, 1.0) as weight,
+                           timestamp, rating
+                    FROM user_interactions
+                    WHERE clerk_user_id = %s
+                    ORDER BY timestamp DESC
+                """, (user_id,))
+                
+                interactions = cursor.fetchall()
             
             # Get stored preferences
             cursor.execute('''
@@ -713,17 +802,21 @@ class EnhancedBookRecommendationEngine:
         """Build user profile from interactions and preferences"""
         try:
             conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Get user interactions
-            cursor.execute('''
-                SELECT book_id, interaction_type, weight, timestamp
-                FROM user_interactions
-                WHERE user_id = ?
-                ORDER BY timestamp DESC
-            ''', (user_id,))
-            
-            interactions = cursor.fetchall()
+            if not conn:
+                return []
+                
+            with conn.cursor() as cursor:
+                # Get user interactions
+                cursor.execute("""
+                    SELECT book_id, interaction_type, 
+                           COALESCE(rating, 1.0) as weight,
+                           timestamp
+                    FROM user_interactions
+                    WHERE clerk_user_id = %s
+                    ORDER BY timestamp DESC
+                """, (user_id,))
+                
+                interactions = cursor.fetchall()
             conn.close()
             
             # Build profile from interactions
@@ -992,29 +1085,37 @@ class EnhancedBookRecommendationEngine:
         reasons = []
         
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Find users with similar interactions
-            cursor.execute('''
-                SELECT ui2.user_id, COUNT(*) as common_books,
-                       GROUP_CONCAT(ui2.book_id) as their_books
-                FROM user_interactions ui1
-                JOIN user_interactions ui2 ON ui1.book_id = ui2.book_id 
-                    AND ui1.user_id != ui2.user_id
-                WHERE ui1.user_id = ? AND ui1.interaction_type IN ('view', 'wishlist')
-                    AND ui2.interaction_type IN ('view', 'wishlist')
-                GROUP BY ui2.user_id
-                HAVING common_books >= 2
-                ORDER BY common_books DESC
-                LIMIT 10
-            ''', (profile.user_id,))
-            
-            similar_users = cursor.fetchall()
-            
-            if similar_users:
-                # Get books liked by similar users that current user hasn't seen
-                recommended_book_ids = Counter()
+            conn = get_db_connection()
+            if not conn:
+                return [], ["Could not connect to database"]
+                
+            with conn.cursor() as cursor:
+                # Find users with similar interactions using PostgreSQL array_agg instead of GROUP_CONCAT
+                cursor.execute("""
+                    WITH similar_users AS (
+                        SELECT ui2.clerk_user_id as user_id,
+                               COUNT(*) as common_books,
+                               array_agg(ui2.book_id) as their_books
+                        FROM user_interactions ui1
+                        JOIN user_interactions ui2 ON ui1.book_id = ui2.book_id
+                            AND ui1.clerk_user_id != ui2.clerk_user_id
+                        WHERE ui1.clerk_user_id = %s 
+                            AND ui1.interaction_type IN ('view', 'wishlist_add')
+                            AND ui2.interaction_type IN ('view', 'wishlist_add')
+                        GROUP BY ui2.clerk_user_id
+                        HAVING COUNT(*) >= 2
+                        ORDER BY COUNT(*) DESC
+                        LIMIT 10
+                    )
+                    SELECT user_id, common_books, their_books::text
+                    FROM similar_users
+                """, (profile.user_id,))
+                
+                similar_users = cursor.fetchall()
+                
+                if similar_users:
+                    # Get books liked by similar users that current user hasn't seen
+                    recommended_book_ids = Counter()
                 
                 for similar_user_id, common_books, their_books in similar_users:
                     their_book_ids = [int(book_id) for book_id in their_books.split(',')]

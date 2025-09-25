@@ -16,7 +16,8 @@ from libby_backend.database import (
     get_content_based_recommendations_db, 
     get_hybrid_recommendations_db,
     get_user_genre_preferences_db,
-    get_trending_books_db
+    get_trending_books_db,
+    get_db_connection
 )
 
 
@@ -231,14 +232,18 @@ def clear_user_cache(user_id: str):
                 'error': 'Recommendation engine not available'
             })
             
-        import sqlite3
-        conn = sqlite3.connect(recommendation_engine.db_path)
-        cursor = conn.cursor()
-        
-        # Delete cached recommendations for this user
-        cursor.execute('DELETE FROM user_recommendations WHERE user_id = ?', (user_id,))
-        deleted_count = cursor.rowcount
-        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+            
+        with conn.cursor() as cursor:
+            # Delete cached recommendations for this user
+            cursor.execute('DELETE FROM recommendations WHERE user_id = %s', (user_id,))
+            deleted_count = cursor.rowcount
+            
         conn.commit()
         conn.close()
         
