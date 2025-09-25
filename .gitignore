@@ -11,3 +11,5 @@
 *.sqlite3
 instance/
 .cache/
+# Clerk sync scripts (contains API keys)
+sync_clerk_users.py
