@@ -959,3 +959,31 @@ def count_recommendations_db(user_id: int | None = None, clerk_user_id: str | No
         return 0
     finally:
         conn.close()
+
+
+
+#onetime timestamp fix
+
+def ensure_login_at_timestamp():
+    """
+    Ensure the login_at column in user_logins is TIMESTAMPTZ with default CURRENT_TIMESTAMP.
+    Run this once at startup or migrations.
+    """
+    conn = get_db_connection()
+    if not conn:
+        print("❌ No DB connection.")
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE user_logins
+                ALTER COLUMN login_at TYPE TIMESTAMPTZ
+                USING login_at::timestamp,
+                ALTER COLUMN login_at SET DEFAULT CURRENT_TIMESTAMP;
+            """)
+            conn.commit()
+            print("✅ user_logins.login_at updated to TIMESTAMPTZ with default CURRENT_TIMESTAMP")
+    except Exception as e:
+        print("⚠️ Could not alter user_logins.login_at:", e)
+    finally:
+        conn.close()
