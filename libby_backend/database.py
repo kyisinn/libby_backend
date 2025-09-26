@@ -126,13 +126,13 @@ def search_books_db(query):
             params = []
             
             for word in query_words:
-                # Exact word match using word boundaries
-                word_boundary = f'\\m{word}\\M'  # PostgreSQL word boundaries
-                word_pattern = f"%{word}%"
-                
-                # Exact word conditions (higher priority)
+                # Exact word regex (higher priority)
+                exact_regex = f'\\m{word}\\M'
                 exact_conditions.append("(b.title ~* %s OR b.author ~* %s OR b.genre ~* %s)")
-                params.extend([word_boundary, word_boundary, word_boundary])
+                params.extend([exact_regex, exact_regex, exact_regex])
+
+                # Fuzzy match (lower priority)
+                word_pattern = f"%{word}%"
                 
                 # Partial match conditions (fallback)
                 partial_conditions.append("(b.title ILIKE %s OR b.author ILIKE %s OR b.genre ILIKE %s)")
