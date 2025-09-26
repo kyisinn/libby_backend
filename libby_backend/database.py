@@ -118,9 +118,25 @@ def search_books_db(query):
         return None
     try:
         query_words = query.strip().split()
+        phrase = query.strip()
+        phrase_pattern = f"%{phrase}%"
+        is_multi_word = len(query_words) >= 2
         
         with conn.cursor() as cursor:
             # Build conditions for exact word matches vs partial matches
+            # Build phrase-level condition (rank 0):
+            # - multi-word → ILIKE "%machine learning%"
+            # - single-word → regex word boundary \mjava\M (prevents "javascript")
+            if is_multi_word:
+                phrase_pattern = f"%{phrase}%"
+                phrase_condition = "(b.title ILIKE %s OR b.author ILIKE %s OR b.genre ILIKE %s)"
+                phrase_params = [phrase_pattern, phrase_pattern, phrase_pattern]
+            else:
+                boundary = f"\\m{phrase}\\M"  # word-boundary regex
+                phrase_condition = "(b.title ~* %s OR b.author ~* %s OR b.genre ~* %s)"
+                phrase_params = [boundary, boundary, boundary]
+        
+
             exact_conditions = []
             partial_conditions = []
             params = []
@@ -143,7 +159,18 @@ def search_books_db(query):
             partial_clause = " AND ".join(partial_conditions)
             
             sql = f"""
-                WITH exact_matches AS (
+                WITH phrase_matches AS (
+                    SELECT DISTINCT
+                        b.book_id AS id,
+                        b.title,
+                        b.cover_image_url AS coverurl,
+                        COALESCE(b.author, 'Unknown Author') AS author,
+                        b.rating,
+                        0 as match_type
+                    FROM books b
+                    WHERE {phrase_condition}
+                ),
+                exact_matches AS (
                     SELECT DISTINCT
                         b.book_id AS id,
                         b.title,
@@ -153,6 +180,7 @@ def search_books_db(query):
                         1 as match_type
                     FROM books b
                     WHERE {exact_clause}
+                    AND b.book_id NOT IN (SELECT id FROM phrase_matches)
                 ),
                 partial_matches AS (
                     SELECT DISTINCT
@@ -164,19 +192,22 @@ def search_books_db(query):
                         2 as match_type
                     FROM books b
                     WHERE {partial_clause}
+                    AND b.book_id NOT IN (SELECT id FROM phrase_matches)
                     AND b.book_id NOT IN (SELECT id FROM exact_matches)
                 )
-                SELECT id, title, coverurl, author, rating
+                SELECT *
                 FROM (
+                    SELECT * FROM phrase_matches
+                    UNION ALL
                     SELECT * FROM exact_matches
                     UNION ALL
                     SELECT * FROM partial_matches
                 ) combined
                 ORDER BY match_type ASC, rating DESC NULLS LAST
-                LIMIT 50
+                LIMIT 50;
             """
             
-            cursor.execute(sql, params)
+            cursor.execute(sql, params+phrase_params)
             return cursor.fetchall()
             
     except Exception as e:
