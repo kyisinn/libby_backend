@@ -12,6 +12,7 @@ import psycopg2
 import requests
 import io
 import time
+import csv
 
 # === CONFIG ===
 DB_URL = "postgresql://postgres:pAflkfysMwUFGUPGzcbLBfUvoVJJjazQ@postgres.railway.internal:5432/railway"
@@ -56,35 +57,43 @@ def import_books():
 
     # 🧹 Clean malformed CSV text
     csv_data = response.text.replace('\r', '').replace('"""', '"')
+    reader = csv.reader(io.StringIO(csv_data))
+    rows = list(reader)
 
-    # Split into lines for validation
-    lines = csv_data.split('\n')
-    header = lines[0].strip()
-    expected_cols = len(header.split(','))
+    # Determine header and expected columns
+    header = rows[0]
+    expected_cols = len(header)
+    cleaned_lines = [','.join(header)]
 
-    cleaned_lines = [header]
-    for line in lines[1:]:
-        # skip completely blank lines
-        if not line.strip():
-            continue
+    for row in rows[1:]:
+        if not any(row):
+            continue  # skip empty lines
 
-        # Fix publication_date floats like 2010.0 → 2010-01-01
-        parts = line.split(',')
-        # Fix publication_date floats like 2010.0 → 2010
-        parts = line.split(',')
-        if len(parts) == expected_cols:
-            if len(parts) > 5 and parts[5].strip().replace('"', '').endswith('.0'):
-                yr = parts[5].strip().replace('"', '').split('.')[0]
-                parts[5] = f'"{yr}"'
-            line = ','.join(parts)
-            cleaned_lines.append(line)
-        else:
-            # if malformed, log or skip
-            print(f"⚠️ Skipped malformed line ({len(parts)} cols): {line[:80]}...")
+        # If row too short or too long, try to fix
+        if len(row) != expected_cols:
+            print(f"⚠️ Attempting to fix malformed row ({len(row)} cols): {row[:3]}...")
+            # Join back extra columns into the description field (usually at index 3 or 4)
+            if len(row) > expected_cols:
+                # merge excess text fields back into description
+                fixed = row[:expected_cols-1]
+                fixed[-1] = ','.join(row[expected_cols-1:])  # merge all extras
+                row = fixed
+            elif len(row) < expected_cols:
+                # pad missing columns
+                row += [''] * (expected_cols - len(row))
+            else:
+                continue
 
-    # Join the cleaned lines back
+        # Fix year floats like 2010.0 → 2010
+        if len(row) > 5 and row[5].strip().endswith('.0'):
+            yr = row[5].strip().split('.')[0]
+            row[5] = yr
+
+        cleaned_lines.append(','.join(f'"{v.replace("\"", "\"\"")}"' for v in row))
+
     csv_data = '\n'.join(cleaned_lines)
     buffer = io.StringIO(csv_data)
+    print(f"✅ Cleaned {len(cleaned_lines)-1} rows ready for import.")
 
     # Step 3. Copy into books_stage
     print("🚀 Loading raw CSV into staging table...")
