@@ -3,6 +3,11 @@ One-time import script with staging table.
 This version is production-safe for Railway deployment.
 """
 
+# NOTE: Ensure the 'publication_date' column in the 'books' table is of type INTEGER (year only).
+# Run:
+# ALTER TABLE public.books DROP COLUMN IF EXISTS publication_date;
+# ALTER TABLE public.books ADD COLUMN publication_date INTEGER;
+
 import psycopg2
 import requests
 import io
@@ -48,6 +53,37 @@ def import_books():
     response = requests.get(CSV_URL)
     response.raise_for_status()
     csv_data = response.text
+
+    # 🧹 Clean malformed CSV text
+    csv_data = response.text.replace('\r', '').replace('"""', '"')
+
+    # Split into lines for validation
+    lines = csv_data.split('\n')
+    header = lines[0].strip()
+    expected_cols = len(header.split(','))
+
+    cleaned_lines = [header]
+    for line in lines[1:]:
+        # skip completely blank lines
+        if not line.strip():
+            continue
+
+        # Fix publication_date floats like 2010.0 → 2010-01-01
+        parts = line.split(',')
+        # Fix publication_date floats like 2010.0 → 2010
+        parts = line.split(',')
+        if len(parts) == expected_cols:
+            if len(parts) > 5 and parts[5].strip().replace('"', '').endswith('.0'):
+                yr = parts[5].strip().replace('"', '').split('.')[0]
+                parts[5] = f'"{yr}"'
+            line = ','.join(parts)
+            cleaned_lines.append(line)
+        else:
+            # if malformed, log or skip
+            print(f"⚠️ Skipped malformed line ({len(parts)} cols): {line[:80]}...")
+
+    # Join the cleaned lines back
+    csv_data = '\n'.join(cleaned_lines)
     buffer = io.StringIO(csv_data)
 
     # Step 3. Copy into books_stage
@@ -75,7 +111,7 @@ def import_books():
             NULLIF(title, ''),
             NULLIF(author, ''),
             NULLIF(description, ''),
-            NULLIF(publication_date, '')::DATE,
+            NULLIF(publication_date, '')::INT,
             NULLIF(cover_image_url, ''),
             NULLIF(genre, ''),
             NULLIF(rating, '')::NUMERIC
