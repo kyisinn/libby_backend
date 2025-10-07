@@ -124,7 +124,7 @@ def import_books():
         INSERT INTO books (book_id, isbn, title, author, description, publication_date, cover_image_url, genre, rating)
         SELECT
             NULLIF(book_id, '')::BIGINT,
-            NULLIF(isbn, '')::BIGINT,
+            NULLIF(isbn, ''),
             NULLIF(title, ''),
             NULLIF(author, ''),
             NULLIF(description, ''),
