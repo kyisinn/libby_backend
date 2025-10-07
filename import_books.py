@@ -55,7 +55,14 @@ def import_books():
     cur.copy_expert("""
         COPY books_stage(isbn, title, author, description, publication_date, cover_image_url, genre, rating)
         FROM STDIN
-        WITH (FORMAT CSV, HEADER TRUE, DELIMITER ',');
+        WITH (
+            FORMAT CSV,
+            HEADER TRUE,
+            DELIMITER ',',
+            QUOTE '"',
+            ESCAPE '"',
+            ENCODING 'UTF8'
+        );
     """, buffer)
     conn.commit()
 
