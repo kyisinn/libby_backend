@@ -1,1 +1,1 @@
-web: python3 libby_backend/import_books.py && gunicorn -w 2 -k gthread -b 0.0.0.0:$PORT libby_backend.wsgi:app
+web: python3 import_books.py && gunicorn -w 2 -k gthread -b 0.0.0.0:$PORT libby_backend.wsgi:app
