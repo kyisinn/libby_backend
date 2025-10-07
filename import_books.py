@@ -37,6 +37,7 @@ def import_books():
     cur.execute("""
         DROP TABLE IF EXISTS books_stage;
         CREATE TEMP TABLE books_stage (
+            book_id TEXT,
             isbn TEXT,
             title TEXT,
             author TEXT,
@@ -98,7 +99,7 @@ def import_books():
     # Step 3. Copy into books_stage
     print("🚀 Loading raw CSV into staging table...")
     cur.copy_expert("""
-        COPY books_stage(isbn, title, author, description, publication_date, cover_image_url, genre, rating)
+        COPY books_stage(book_id, isbn, title, author, description, publication_date, cover_image_url, genre, rating)
         FROM STDIN
         WITH (
             FORMAT CSV,
@@ -114,8 +115,9 @@ def import_books():
     # Step 4. Insert clean data into main books table
     print("🧹 Transforming and inserting into books...")
     cur.execute("""
-        INSERT INTO books (isbn, title, author, description, publication_date, cover_image_url, genre, rating)
+        INSERT INTO books (book_id, isbn, title, author, description, publication_date, cover_image_url, genre, rating)
         SELECT
+            NULLIF(book_id, '')::BIGINT,
             NULLIF(isbn, '')::BIGINT,
             NULLIF(title, ''),
             NULLIF(author, ''),
