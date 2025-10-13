@@ -31,11 +31,9 @@ def create_app():
     init_cache(app)
 
     # Blueprints
-    from libby_backend.blueprints.auth.routes import bp as auth_bp
     from libby_backend.blueprints.books.routes import bp as books_bp
     from libby_backend.blueprints.health.routes import bp as health_bp
 
-    app.register_blueprint(auth_bp)
     app.register_blueprint(books_bp)
     app.register_blueprint(health_bp)
 
