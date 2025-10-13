@@ -1,40 +1,51 @@
 # =============================================================================
-# FLASK BOOK RECOMMENDATION API - ENTRYPOINT (CLEANED)
+# FLASK BOOK RECOMMENDATION API - ENTRYPOINT (CLEANED WITH CLERK & CACHE)
 # =============================================================================
 from flask import Flask, jsonify
 from flask_cors import CORS
-from libby_backend.cache import init_cache
 import os, re
 
+# Clerk authentication routes
 from libby_backend.blueprints.clerk.routes import clerk_bp
-from apscheduler.schedulers.background import BackgroundScheduler
-import atexit
 
-# Notify prefs blueprint and digest runner
-from libby_backend.notify_prefs_routes import prefs_bp
-from libby_backend.digests import send_due_digests_batch
+# Cache system (Redis or SimpleCache)
+from libby_backend.cache import init_cache
 
+# Database connection for health check
+from libby_backend.database import get_db_connection
 
+# Hybrid recommender engine
+from recommender.hybrid_fusion import get_final_recommendations
 
+# App configuration
+from libby_backend.config import Config
 
 
 # =============================================================================
 # APPLICATION SETUP
 # =============================================================================
-from libby_backend.config import Config
-
 app = Flask(__name__)
 app.config.from_object(Config)
 
+# Register Clerk blueprint for authentication routes
 app.register_blueprint(clerk_bp)
 
+# Initialize cache
+cache = init_cache(app)
+
+
+# =============================================================================
+# CORS CONFIGURATION
+# =============================================================================
 VERCEL_ORIGIN = "https://libby-bot.vercel.app"
 ALLOWED_ORIGINS = [
     VERCEL_ORIGIN,
     "http://localhost:3000",
     "http://127.0.0.1:3000"
 ]
-origin_regex = re.compile(r"^https://[-a-z0-9]+\.vercel\.app$") 
+# Allow all Vercel subdomains (e.g., staging builds)
+origin_regex = re.compile(r"^https://[-a-z0-9]+\.vercel\.app$")
+
 CORS(
     app,
     resources={r"/api/*": {"origins": ALLOWED_ORIGINS + [origin_regex]}},
@@ -44,98 +55,59 @@ CORS(
     max_age=86400,
     supports_credentials=False,  # set True ONLY if you send cookies
 )
-cache = init_cache(app)
 
-# Initialize database tables for recommendation system
-from libby_backend.database import initialize_recommendation_tables
-try:
-    initialize_recommendation_tables()
-except Exception as e:
-    print(f"Warning: Could not initialize recommendation tables: {e}")
 
 # =============================================================================
-# OPTIONAL BLUEPRINT REGISTRATION
-# (These will be used if you've split your routes into modules.)
-# =============================================================================
-
-
-from libby_backend.blueprints.books.routes import books_bp
-app.register_blueprint(books_bp, url_prefix="/api/books")
-
-# Enable recommendations blueprint
-from libby_backend.blueprints.recommendations.routes import rec_bp
-app.register_blueprint(rec_bp, url_prefix="/api/recommendations")
-
-from libby_backend.blueprints.health.routes import health_bp
-app.register_blueprint(health_bp, url_prefix="/api/health")
-
-from libby_backend.blueprints.profile.routes import profile_bp
-app.register_blueprint(profile_bp, url_prefix="/api/profile")
-
-from libby_backend.blueprints.utils.routes import utils_bp
-app.register_blueprint(utils_bp, url_prefix="/api")
-
-# Register notify prefs endpoints
-app.register_blueprint(prefs_bp)
-
-# Scheduler (works if your process stays warm; otherwise use platform cron to hit /api/notify/run-due)
-scheduler = BackgroundScheduler(timezone="UTC")
-# Job configured with max_instances=1 to prevent overlapping runs
-scheduler.add_job(
-    send_due_digests_batch,
-    "cron",
-    hour=2,
-    minute=0,
-    id="send_due_digests",
-    max_instances=1,
-)
-scheduler.start()
-
-# Ensure scheduler is shut down cleanly when the process exits
-atexit.register(lambda: scheduler.shutdown(wait=False))
-
-
-@app.route("/api/notify/run-due", methods=["POST"])
-def run_due_now():
-    count = send_due_digests_batch()
-    return jsonify({"ok": True, "sent": count})
-
-# =============================================================================
-# HEALTH CHECK (fallback if no health blueprint is present)
+# HEALTH CHECK
 # =============================================================================
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    return jsonify({
-        "status": "healthy",
-        "service": "book-recommendation-api",
-        "version": "1.0.0"
-    })
-
-@app.route('/api/health/detailed', methods=['GET'])
-def detailed_health_check():
+    """Check database and cache status."""
     try:
-        from libby_backend.database import get_db_connection
+        # Check database
         conn = get_db_connection()
         db_ok = bool(conn)
         if conn:
             conn.close()
 
+        # Check cache
         cache_ok = True
-        if app.config.get("CACHE_TYPE") == "RedisCache":
-            try:
-                cache.set("health:ping", "pong", timeout=5)
-                cache_ok = cache.get("health:ping") == "pong"
-            except Exception:
-                cache_ok = False
+        try:
+            cache.set("health:ping", "pong", timeout=5)
+            cache_ok = cache.get("health:ping") == "pong"
+        except Exception:
+            cache_ok = False
 
         status = "healthy" if (db_ok and cache_ok) else "degraded"
         return jsonify({
             "status": status,
             "database": "connected" if db_ok else "failed",
             "cache": "connected" if cache_ok else "failed",
+            "service": "libby-bot-recommender",
+            "version": "1.0.0"
         })
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
+
+# =============================================================================
+# RECOMMENDATION ENDPOINT
+# =============================================================================
+@app.route('/api/recommend/<int:user_id>', methods=['GET'])
+def recommend(user_id):
+    """Generate hybrid recommendations for a user (cached)."""
+    cache_key = f"recommend:{user_id}"
+    cached_result = cache.get(cache_key)
+    if cached_result:
+        return jsonify({"cached": True, "data": cached_result})
+
+    try:
+        results = get_final_recommendations(user_id, top_n=10)
+        cache.set(cache_key, results, timeout=300)  # cache for 5 minutes
+        return jsonify({"cached": False, "data": results})
+    except Exception as e:
+        return jsonify({"error": f"Failed to generate recommendations: {str(e)}"}), 500
+
 
 # =============================================================================
 # ERROR HANDLERS
@@ -152,17 +124,9 @@ def internal_error(error):
 def bad_request(error):
     return jsonify({"error": "Bad request"}), 400
 
+
 # =============================================================================
 # APPLICATION RUNNER
 # =============================================================================
 if __name__ == '__main__':
-    app.run(debug=True)
-
-# =============================================================================
-# NEW ENGINE
-# =============================================================================
-from recommender.hybrid_fusion import get_final_recommendations
-@app.route('/recommend/<int:user_id>')
-def recommend(user_id):
-    final = get_final_recommendations(user_id)
-    return jsonify(final)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
