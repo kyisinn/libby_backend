@@ -227,15 +227,15 @@ def get_trending_books_db(period, page, per_page):
         return None
 
     offset = (page - 1) * per_page
+    # Map period to a number of years for integer year comparisons
     period_mapping = {
-        'weekly': '7 days', '1week': '7 days',
-        'monthly': '30 days', '1month': '30 days',
-        '3months': '90 days', '6months': '180 days',
-        'yearly': '365 days', '1year': '365 days',
-        '2years': '730 days', '5years': '1825 days'
+        'weekly': 1/52, '1week': 1/52,
+        'monthly': 1/12, '1month': 1/12,
+        '3months': 0.25, '6months': 0.5,
+        'yearly': 1, '1year': 1,
+        '2years': 2, '5years': 5
     }
-    interval_period = period_mapping.get(period, '1825 days')
-
+    years = period_mapping.get(period, 5)
     try:
         with conn.cursor() as cursor:
             cursor.execute("""
@@ -243,22 +243,20 @@ def get_trending_books_db(period, page, per_page):
                     SELECT DISTINCT
                         b.book_id AS id,
                         b.title,
-                        b.cover_image_url AS coverurl,
+                        b.cover_image_url AS cover_image_url,
                         b.rating,
                         CASE 
-                            WHEN EXTRACT(YEAR FROM b.publication_date) > 2025
-                            THEN b.publication_date - INTERVAL '543 years'
+                            WHEN b.publication_date > 2025 THEN b.publication_date - 543
                             ELSE b.publication_date
                         END AS corrected_date,
                         COALESCE(b.author, 'Unknown Author') AS author,
                         CASE 
                             WHEN (
                                 CASE 
-                                    WHEN EXTRACT(YEAR FROM b.publication_date) > 2025
-                                    THEN b.publication_date - INTERVAL '543 years'
+                                    WHEN b.publication_date > 2025 THEN b.publication_date - 543
                                     ELSE b.publication_date
                                 END
-                            ) >= CURRENT_DATE - INTERVAL %s THEN 1 
+                            ) >= (EXTRACT(YEAR FROM CURRENT_DATE) - %s) THEN 1 
                             ELSE 2 
                         END as date_priority
                     FROM books b
@@ -268,17 +266,16 @@ def get_trending_books_db(period, page, per_page):
                         AND b.rating IS NOT NULL
                         AND (
                             CASE 
-                                WHEN EXTRACT(YEAR FROM b.publication_date) > 2025
-                                THEN b.publication_date - INTERVAL '543 years'
+                                WHEN b.publication_date > 2025 THEN b.publication_date - 543
                                 ELSE b.publication_date
                             END
-                        ) >= CURRENT_DATE - INTERVAL %s
+                        ) >= (EXTRACT(YEAR FROM CURRENT_DATE) - %s)
                 )
-                SELECT id, title, coverurl, rating, author, corrected_date AS publication_date
+                SELECT id, title, cover_image_url, rating, author, corrected_date AS publication_date
                 FROM trending_books
                 ORDER BY date_priority ASC, rating DESC, corrected_date DESC NULLS LAST
                 LIMIT %s OFFSET %s
-            """, (interval_period, interval_period, per_page, offset))
+            """, (years, years, per_page, offset))
             books = cursor.fetchall()
 
             # Get total count for pagination - only books matching the period filter
@@ -290,12 +287,11 @@ def get_trending_books_db(period, page, per_page):
                   AND b.rating IS NOT NULL
                   AND (
                       CASE 
-                          WHEN EXTRACT(YEAR FROM b.publication_date) > 2025
-                          THEN b.publication_date - INTERVAL '543 years'
+                          WHEN b.publication_date > 2025 THEN b.publication_date - 543
                           ELSE b.publication_date
                       END
-                  ) >= CURRENT_DATE - INTERVAL %s
-            """, (interval_period,))
+                  ) >= (EXTRACT(YEAR FROM CURRENT_DATE) - %s)
+            """, (years,))
             total_books = cursor.fetchone()['count']
             
             return {'books': books, 'total_books': total_books}
@@ -322,7 +318,7 @@ def get_books_by_major_db(major, page, per_page):
                 SELECT DISTINCT
                     b.book_id AS id,
                     b.title,
-                    b.cover_image_url AS coverurl,
+                    b.cover_image_url AS cover_image_url,
                     b.rating,
                     COALESCE(b.author, 'Unknown Author') AS author
                 FROM books b
@@ -366,7 +362,7 @@ def get_similar_books_details(similar_book_ids):
                 SELECT DISTINCT
                     b.book_id AS id,
                     b.title,
-                    b.cover_image_url AS coverurl,
+                    b.cover_image_url AS cover_image_url,
                     b.rating,
                     COALESCE(b.author, 'Unknown Author') AS author
                 FROM books b
@@ -391,7 +387,7 @@ def get_books_by_genre_db(target_genre, exclude_book_id, limit=10):
                 SELECT DISTINCT
                     b.book_id AS id,
                     b.title,
-                    b.cover_image_url AS coverurl,
+                    b.cover_image_url AS cover_image_url,
                     b.rating,
                     COALESCE(b.author, 'Unknown Author') AS author
                 FROM books b
@@ -434,24 +430,7 @@ def get_book_by_id_db(book_id):
     finally:
         conn.close()
 
-# # RECORD USER INTERACTION
-# def record_user_interaction(user_id: int, book_id: int, interaction_type: str = "view"):
-#     conn = get_db_connection()
-#     if not conn:
-#         return None
-#     try:
-#         with conn.cursor() as cur:
-#             cur.execute("""
-#                 INSERT INTO user_interactions (user_id, book_id, interaction_type)
-#                 VALUES (%s, %s, %s)
-#                 RETURNING id, user_id, book_id, interaction_type, timestamp
-#             """, (user_id, book_id, interaction_type))
-#             return cur.fetchone()
-#     except Exception as e:
-#         print("record_user_interaction error:", e)
-#         return None
-#     finally:
-#         conn.close()
+
 
 def _resolve_numeric_user_id(conn, user_id: Optional[int], clerk_user_id: Optional[str]) -> Optional[int]:
     """Resolve a deterministic numeric user_id from either an integer or a clerk_user_id.
