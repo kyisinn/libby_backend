@@ -157,3 +157,12 @@ def bad_request(error):
 # =============================================================================
 if __name__ == '__main__':
     app.run(debug=True)
+
+# =============================================================================
+# NEW ENGINE
+# =============================================================================
+from recommender.hybrid_fusion import get_final_recommendations
+@app.route('/recommend/<int:user_id>')
+def recommend(user_id):
+    final = get_final_recommendations(user_id)
+    return jsonify(final)
