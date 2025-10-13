@@ -227,57 +227,75 @@ def get_trending_books_db(period, page, per_page):
         return None
 
     offset = (page - 1) * per_page
-    # Map period to a number of years for integer year comparisons
+    # Updated period mapping: weekly → current year, monthly → last 2 years, yearly → last 5 years
     period_mapping = {
-        'weekly': 1/52, '1week': 1/52,
-        'monthly': 1/12, '1month': 1/12,
-        '3months': 0.25, '6months': 0.5,
-        'yearly': 1, '1year': 1,
-        '2years': 2, '5years': 5
+        'weekly': 0, '1week': 0,
+        'monthly': 2, '1month': 2,
+        'yearly': 5, '1year': 5,
+        '2years': 7, '5years': 10
     }
     years = period_mapping.get(period, 5)
+
     try:
         with conn.cursor() as cursor:
-            cursor.execute("""
-                WITH trending_books AS (
+            # If years == 0, filter only current year
+            if years == 0:
+                cursor.execute("""
                     SELECT DISTINCT
                         b.book_id AS id,
                         b.title,
                         b.cover_image_url AS cover_image_url,
                         b.rating,
-                        CASE 
-                            WHEN b.publication_date > 2025 THEN b.publication_date - 543
-                            ELSE b.publication_date
-                        END AS corrected_date,
                         COALESCE(b.author, 'Unknown Author') AS author,
-                        CASE 
-                            WHEN (
+                        b.publication_date AS year
+                    FROM books b
+                    WHERE b.publication_date = EXTRACT(YEAR FROM CURRENT_DATE)
+                    AND b.cover_image_url IS NOT NULL
+                    AND b.rating IS NOT NULL
+                    ORDER BY b.rating DESC NULLS LAST, b.publication_date DESC NULLS LAST
+                    LIMIT %s OFFSET %s;
+                """, (per_page, offset))
+            else:
+                cursor.execute("""
+                    WITH trending_books AS (
+                        SELECT DISTINCT
+                            b.book_id AS id,
+                            b.title,
+                            b.cover_image_url AS cover_image_url,
+                            b.rating,
+                            CASE 
+                                WHEN b.publication_date > 2025 THEN b.publication_date - 543
+                                ELSE b.publication_date
+                            END AS corrected_date,
+                            COALESCE(b.author, 'Unknown Author') AS author,
+                            CASE 
+                                WHEN (
+                                    CASE 
+                                        WHEN b.publication_date > 2025 THEN b.publication_date - 543
+                                        ELSE b.publication_date
+                                    END
+                                ) >= (EXTRACT(YEAR FROM CURRENT_DATE) - %s) THEN 1 
+                                ELSE 2 
+                            END as date_priority
+                        FROM books b
+                        WHERE
+                            b.cover_image_url IS NOT NULL 
+                            AND b.cover_image_url <> ''
+                            AND (
                                 CASE 
                                     WHEN b.publication_date > 2025 THEN b.publication_date - 543
                                     ELSE b.publication_date
                                 END
-                            ) >= (EXTRACT(YEAR FROM CURRENT_DATE) - %s) THEN 1 
-                            ELSE 2 
-                        END as date_priority
-                    FROM books b
-                    WHERE
-                        b.cover_image_url IS NOT NULL 
-                        AND b.cover_image_url <> ''
-                        AND (
-                            CASE 
-                                WHEN b.publication_date > 2025 THEN b.publication_date - 543
-                                ELSE b.publication_date
-                            END
-                        ) >= (EXTRACT(YEAR FROM CURRENT_DATE) - %s)
-                )
-                SELECT id, title, cover_image_url, rating, author, corrected_date AS publication_date
-                FROM trending_books
-                ORDER BY date_priority ASC, rating DESC, corrected_date DESC NULLS LAST
-                LIMIT %s OFFSET %s
-            """, (years, years, per_page, offset))
+                            ) >= (EXTRACT(YEAR FROM CURRENT_DATE) - %s)
+                    )
+                    SELECT id, title, cover_image_url, rating, author, corrected_date AS publication_date
+                    FROM trending_books
+                    ORDER BY date_priority ASC, rating DESC, corrected_date DESC NULLS LAST
+                    LIMIT %s OFFSET %s;
+                """, (years, years, per_page, offset))
             books = cursor.fetchall()
 
-            # Fallback: if too few trending books, relax filters to show more
+            # Fallback: if too few trending books, relax filters
             if not books or len(books) < 10:
                 cursor.execute("""
                     SELECT b.book_id AS id, b.title, b.cover_image_url AS cover_image_url,
@@ -285,25 +303,14 @@ def get_trending_books_db(period, page, per_page):
                            b.publication_date
                     FROM books b
                     ORDER BY b.rating DESC NULLS LAST, b.publication_date DESC NULLS LAST
-                    LIMIT %s OFFSET %s
+                    LIMIT %s OFFSET %s;
                 """, (per_page, offset))
                 books = cursor.fetchall()
 
-            # Get total count for pagination - only books matching the period filter
-            cursor.execute("""
-                SELECT COUNT(DISTINCT b.book_id) AS count
-                FROM books b
-                WHERE b.cover_image_url IS NOT NULL 
-                  AND b.cover_image_url <> ''
-                  AND (
-                      CASE 
-                          WHEN b.publication_date > 2025 THEN b.publication_date - 543
-                          ELSE b.publication_date
-                      END
-                  ) >= (EXTRACT(YEAR FROM CURRENT_DATE) - %s)
-            """, (years,))
+            # Total count
+            cursor.execute("SELECT COUNT(*) AS count FROM books;")
             total_books = cursor.fetchone()['count']
-            
+
             return {'books': books, 'total_books': total_books}
     except Exception as e:
         print("Railway trending query error:", e)
