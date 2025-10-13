@@ -15,7 +15,7 @@ from libby_backend.cache import init_cache
 from libby_backend.database import get_db_connection
 
 # Hybrid recommender engine
-from recommender.hybrid_fusion import get_final_recommendations
+from libby_backend.recommender.hybrid_fusion import get_final_recommendations
 
 # App configuration
 from libby_backend.config import Config
