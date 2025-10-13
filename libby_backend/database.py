@@ -295,18 +295,6 @@ def get_trending_books_db(period, page, per_page):
                 """, (years, years, per_page, offset))
             books = cursor.fetchall()
 
-            # Fallback: if too few trending books, relax filters
-            if not books or len(books) < 10:
-                cursor.execute("""
-                    SELECT b.book_id AS id, b.title, b.cover_image_url AS cover_image_url,
-                           b.rating, COALESCE(b.author, 'Unknown Author') AS author,
-                           b.publication_date
-                    FROM books b
-                    ORDER BY b.rating DESC NULLS LAST, b.publication_date DESC NULLS LAST
-                    LIMIT %s OFFSET %s;
-                """, (per_page, offset))
-                books = cursor.fetchall()
-
             # Total count
             cursor.execute("SELECT COUNT(*) AS count FROM books;")
             total_books = cursor.fetchone()['count']
