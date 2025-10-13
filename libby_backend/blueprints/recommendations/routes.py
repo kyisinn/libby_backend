@@ -420,8 +420,6 @@ def get_improved_recommendations_with_fallbacks(user_id: str):
                 "coverurl": cover_url,
                 "rating": float(getattr(book, "rating", None)) if getattr(book, "rating", None) is not None else None,
                 "publication_date": getattr(book, "publication_date", None),
-                "pages": getattr(book, "pages", None),
-                "language": getattr(book, "language", None),
                 "isbn": getattr(book, "isbn", None),
                 "similarity_score": getattr(book, "similarity_score", None),
             })
@@ -531,8 +529,6 @@ def get_user_recommendations(user_id: str):
                         'cover_image_url': book.cover_image_url,
                         'rating': float(book.rating) if book.rating else None,
                         'publication_date': book.publication_date,
-                        'pages': book.pages,
-                        'language': book.language,
                         'isbn': book.isbn,
                         'similarity_score': getattr(book, 'similarity_score', None)
                     }
