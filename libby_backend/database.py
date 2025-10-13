@@ -263,7 +263,6 @@ def get_trending_books_db(period, page, per_page):
                     WHERE
                         b.cover_image_url IS NOT NULL 
                         AND b.cover_image_url <> ''
-                        AND b.rating IS NOT NULL
                         AND (
                             CASE 
                                 WHEN b.publication_date > 2025 THEN b.publication_date - 543
@@ -278,13 +277,24 @@ def get_trending_books_db(period, page, per_page):
             """, (years, years, per_page, offset))
             books = cursor.fetchall()
 
+            # Fallback: if too few trending books, relax filters to show more
+            if not books or len(books) < 10:
+                cursor.execute("""
+                    SELECT b.book_id AS id, b.title, b.cover_image_url AS cover_image_url,
+                           b.rating, COALESCE(b.author, 'Unknown Author') AS author,
+                           b.publication_date
+                    FROM books b
+                    ORDER BY b.rating DESC NULLS LAST, b.publication_date DESC NULLS LAST
+                    LIMIT %s OFFSET %s
+                """, (per_page, offset))
+                books = cursor.fetchall()
+
             # Get total count for pagination - only books matching the period filter
             cursor.execute("""
                 SELECT COUNT(DISTINCT b.book_id) AS count
                 FROM books b
                 WHERE b.cover_image_url IS NOT NULL 
                   AND b.cover_image_url <> ''
-                  AND b.rating IS NOT NULL
                   AND (
                       CASE 
                           WHEN b.publication_date > 2025 THEN b.publication_date - 543
