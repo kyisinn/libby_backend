@@ -115,18 +115,6 @@ def run_due_now():
     return jsonify({"ok": True, "sent": count})
 
 
-
-
-# =============================================================================
-# ADMIN BLUEPRINT
-# =============================================================================
-from libby_backend.blueprints.admin import admin_bp 
-
-app.register_blueprint(admin_bp, url_prefix="/api/admin")
-
-
-
-
 # =============================================================================
 # HEALTH CHECK (fallback if no health blueprint is present)
 # =============================================================================
