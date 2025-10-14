@@ -1,5 +1,6 @@
 Flask==3.1.1
 flask-cors==6.0.1
+Flask-Mail==0.10.0
 gunicorn==23.0.0
 psycopg2-binary==2.9.10
 python-dotenv==1.0.0
@@ -9,5 +10,6 @@ redis==5.0.8
 sqlalchemy==2.0.23
 clerk-backend-api==3.3.0
 requests==2.32.5
+resend==2.4.0
 
 APScheduler==3.10.1

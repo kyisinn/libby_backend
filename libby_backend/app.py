@@ -22,9 +22,22 @@ from libby_backend.digests import send_due_digests_batch
 # APPLICATION SETUP
 # =============================================================================
 from libby_backend.config import Config
+from libby_backend.extensions import mail
 
 app = Flask(__name__)
 app.config.from_object(Config)
+
+# Configure Flask-Mail
+app.config['MAIL_SERVER'] = os.getenv('SMTP_HOST', 'smtp.gmail.com')
+app.config['MAIL_PORT'] = int(os.getenv('SMTP_PORT', '587'))
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USE_SSL'] = False
+app.config['MAIL_USERNAME'] = os.getenv('SENDER_EMAIL')
+app.config['MAIL_PASSWORD'] = os.getenv('SENDER_APP_PASSWORD')
+app.config['MAIL_DEFAULT_SENDER'] = os.getenv('SENDER_EMAIL')
+
+# Initialize Flask-Mail
+mail.init_app(app)
 
 app.register_blueprint(clerk_bp)
 

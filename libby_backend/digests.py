@@ -112,7 +112,7 @@ def send_digest_for_user(clerk_user_id: str):
 
     html = au_bibliophiles_recs_html([
         _book_to_card(b) for b in books
-    ], explore_url=f"{FRONTEND_BASE}/recommendations")
+    ], explore_url=f"{FRONTEND_BASE}app/recommendation")
     send_html_email(user["email"], "Recommended Reads Book Suggestions", html)
 
     # 5) Stamp last sent so cadence continues
