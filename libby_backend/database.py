@@ -986,4 +986,229 @@ def count_recommendations_db(user_id: int | None = None, clerk_user_id: str | No
         conn.close()
 
 
+# -----------------------------------------------------------------------------
+# USER RATINGS
+# -----------------------------------------------------------------------------
+def save_user_rating_db(user_id: int, book_id: int, rating: float, review_text: str = None, clerk_user_id: str = None, 
+                       user_name: str = None, user_email: str = None) -> dict:
+    """
+    Save or update a user's rating and review for a book.
+    Ensures user exists in users table before inserting rating.
+    Also updates user's name and email if provided.
+    Returns the created/updated rating record.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # First, ensure user exists in users table
+            cur.execute("""
+                SELECT user_id FROM users WHERE user_id = %s
+            """, (user_id,))
+            user_exists = cur.fetchone()
+            
+            # Split user_name into first and last if it contains a space
+            first_name, last_name = None, None
+            if user_name:
+                name_parts = user_name.strip().split(None, 1)  # Split on first space
+                first_name = name_parts[0] if len(name_parts) > 0 else None
+                last_name = name_parts[1] if len(name_parts) > 1 else None
+            
+            if not user_exists:
+                # Create user record if it doesn't exist
+                cur.execute("""
+                    INSERT INTO users (user_id, clerk_user_id, first_name, last_name, email, password_hash, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, 'clerk_auth', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ON CONFLICT (user_id) DO NOTHING
+                """, (user_id, clerk_user_id, first_name, last_name, user_email))
+            else:
+                # Update existing user's name and email if provided
+                if user_name or user_email:
+                    cur.execute("""
+                        UPDATE users 
+                        SET first_name = COALESCE(%s, first_name),
+                            last_name = COALESCE(%s, last_name),
+                            email = COALESCE(%s, email),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = %s
+                    """, (first_name, last_name, user_email, user_id))
+            
+            # Check if rating already exists
+            cur.execute("""
+                SELECT rating_id FROM user_rating 
+                WHERE user_id = %s AND book_id = %s
+            """, (user_id, book_id))
+            existing = cur.fetchone()
+            
+            if existing:
+                # Update existing rating
+                cur.execute("""
+                    UPDATE user_rating 
+                    SET rating = %s, review_text = %s, create_at = CURRENT_TIMESTAMP
+                    WHERE user_id = %s AND book_id = %s
+                    RETURNING rating_id, user_id, book_id, rating, review_text, create_at, is_verified
+                """, (rating, review_text, user_id, book_id))
+            else:
+                # Insert new rating
+                cur.execute("""
+                    INSERT INTO user_rating (user_id, book_id, rating, review_text, create_at, is_verified)
+                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, FALSE)
+                    RETURNING rating_id, user_id, book_id, rating, review_text, create_at, is_verified
+                """, (user_id, book_id, rating, review_text))
+            
+            result = cur.fetchone()
+            conn.commit()
+            return dict(result) if result else None
+    except Exception as e:
+        logger.error(f"save_user_rating_db error: {e}")
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+
+def get_user_rating_db(user_id: int, book_id: int) -> dict:
+    """Get a specific user's rating for a book."""
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT rating_id, user_id, book_id, rating, review_text, create_at, is_verified
+                FROM user_rating
+                WHERE user_id = %s AND book_id = %s
+            """, (user_id, book_id))
+            result = cur.fetchone()
+            return dict(result) if result else None
+    except Exception as e:
+        logger.error(f"get_user_rating_db error: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_user_ratings_db(user_id: int, limit: int = 50) -> List[dict]:
+    """Get all ratings by a specific user."""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT 
+                    r.rating_id, r.user_id, r.book_id, r.rating, r.review_text, 
+                    r.create_at, r.is_verified,
+                    b.title, b.author, b.cover_image_url, b.genre
+                FROM user_rating r
+                LEFT JOIN books b ON b.book_id = r.book_id
+                WHERE r.user_id = %s
+                ORDER BY r.create_at DESC
+                LIMIT %s
+            """, (user_id, limit))
+            return cur.fetchall()
+    except Exception as e:
+        logger.error(f"get_user_ratings_db error: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_book_ratings_db(book_id: int, limit: int = 50) -> List[dict]:
+    """Get all ratings for a specific book with user information."""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT 
+                    r.rating_id,
+                    r.user_id,
+                    r.book_id,
+                    r.rating,
+                    r.review_text,
+                    r.create_at,
+                    r.is_verified,
+                    u.clerk_user_id,
+                    u.first_name,
+                    u.last_name,
+                    u.email
+                FROM user_rating r
+                LEFT JOIN users u ON r.user_id = u.user_id
+                WHERE r.book_id = %s
+                ORDER BY r.create_at DESC
+                LIMIT %s
+            """, (book_id, limit))
+            return cur.fetchall()
+    except Exception as e:
+        logger.error(f"get_book_ratings_db error: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def delete_user_rating_db(user_id: int, book_id: int) -> bool:
+    """Delete a user's rating for a book."""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM user_rating 
+                WHERE user_id = %s AND book_id = %s
+            """, (user_id, book_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.error(f"delete_user_rating_db error: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def get_book_rating_stats_db(book_id: int) -> dict:
+    """Get rating statistics for a book (average, count, distribution)."""
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT 
+                    COUNT(*) as total_ratings,
+                    AVG(rating) as average_rating,
+                    COUNT(CASE WHEN rating = 5 THEN 1 END) as five_star,
+                    COUNT(CASE WHEN rating = 4 THEN 1 END) as four_star,
+                    COUNT(CASE WHEN rating = 3 THEN 1 END) as three_star,
+                    COUNT(CASE WHEN rating = 2 THEN 1 END) as two_star,
+                    COUNT(CASE WHEN rating = 1 THEN 1 END) as one_star
+                FROM user_rating
+                WHERE book_id = %s
+            """, (book_id,))
+            result = cur.fetchone()
+            if result:
+                return {
+                    'book_id': book_id,
+                    'total_ratings': int(result['total_ratings'] or 0),
+                    'average_rating': float(result['average_rating'] or 0),
+                    'distribution': {
+                        '5': int(result['five_star'] or 0),
+                        '4': int(result['four_star'] or 0),
+                        '3': int(result['three_star'] or 0),
+                        '2': int(result['two_star'] or 0),
+                        '1': int(result['one_star'] or 0)
+                    }
+                }
+            return None
+    except Exception as e:
+        logger.error(f"get_book_rating_stats_db error: {e}")
+        return None
+    finally:
+        conn.close()
+
+
 

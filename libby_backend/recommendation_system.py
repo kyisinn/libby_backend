@@ -203,32 +203,70 @@ class EnhancedBookRecommendationEngine:
             self.book_vectors[book.id] = self.tfidf.vectorize(content)
 
     def _load_user_rating_matrix(self, profile: UserProfile):
-        """Load user-book rating matrix from database"""
+        """Load user-book rating matrix from database (user_rating + user_interactions)"""
         try:
             conn = get_db_connection()
             if not conn:
                 return
             
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Get ratings for all users who have rated books
+                # First, get explicit ratings from user_rating table (priority)
                 cur.execute("""
-                    SELECT clerk_user_id, book_id, rating
-                    FROM user_interactions
-                    WHERE rating IS NOT NULL AND rating > 0
+                    SELECT ur.user_id, ur.book_id, ur.rating,
+                           u.clerk_user_id
+                    FROM user_rating ur
+                    LEFT JOIN users u ON ur.user_id = u.user_id
+                    WHERE ur.rating IS NOT NULL AND ur.rating > 0
                 """)
-                rows = cur.fetchall()
+                explicit_ratings = cur.fetchall()
                 
-                for row in rows:
-                    user_id = row['clerk_user_id']
+                for row in explicit_ratings:
+                    # Use clerk_user_id if available, otherwise use user_id as string
+                    user_id = row.get('clerk_user_id') or str(row['user_id'])
                     book_id = row['book_id']
                     rating = float(row['rating'])
                     
                     if user_id not in self.user_rating_matrix:
                         self.user_rating_matrix[user_id] = {}
                     self.user_rating_matrix[user_id][book_id] = rating
+                
+                # Then, get implicit ratings from user_interactions (only if not already rated)
+                # Convert interaction types to implicit ratings
+                cur.execute("""
+                    SELECT clerk_user_id, book_id, interaction_type, rating
+                    FROM user_interactions
+                    WHERE clerk_user_id IS NOT NULL
+                """)
+                interactions = cur.fetchall()
+                
+                for row in interactions:
+                    user_id = row['clerk_user_id']
+                    book_id = row['book_id']
+                    
+                    if user_id not in self.user_rating_matrix:
+                        self.user_rating_matrix[user_id] = {}
+                    
+                    # Only use implicit rating if no explicit rating exists
+                    if book_id not in self.user_rating_matrix[user_id]:
+                        # Convert interactions to implicit ratings
+                        interaction_type = row['interaction_type']
+                        if interaction_type == 'rate' and row.get('rating'):
+                            # Use explicit rating from interaction
+                            rating = float(row['rating'])
+                        elif interaction_type == 'wishlist_add':
+                            rating = 4.0  # High implicit interest
+                        elif interaction_type == 'like':
+                            rating = 3.5  # Medium-high interest
+                        elif interaction_type == 'view':
+                            rating = 3.0  # Medium interest
+                        else:
+                            rating = 2.5  # Low interest
+                        
+                        self.user_rating_matrix[user_id][book_id] = rating
             
             conn.close()
-            logger.info(f"Loaded rating matrix: {len(self.user_rating_matrix)} users")
+            total_ratings = sum(len(books) for books in self.user_rating_matrix.values())
+            logger.info(f"Loaded rating matrix: {len(self.user_rating_matrix)} users, {total_ratings} ratings")
             
         except Exception as e:
             logger.error(f"Error loading rating matrix: {e}")
@@ -594,49 +632,58 @@ class EnhancedBookRecommendationEngine:
 
     def collaborative_filtering(self, profile: UserProfile, limit: int = 10) -> Tuple[List[Book], List[str]]:
         """
-        Collaborative Filtering using implicit feedback (views, likes, wishlist, ratings)
-        Uses the database function that finds similar users based on interaction overlap
+        Collaborative Filtering with Pearson Correlation
+        Steps:
+        1. Load user-book rating matrix
+        2. Find similar users using Pearson correlation
+        3. Predict ratings for unseen books
+        4. Return top-N recommendations
         """
         recommendations = []
         reasons = []
         
         try:
-            # Use the database collaborative filtering that handles implicit feedback
-            from libby_backend.database import collaborative_filtering_recommendations_pg
+            # Load rating matrix
+            self._load_user_rating_matrix(profile)
             
-            # Resolve user_id (may be None)
-            user_id = None
-            if profile.user_id and str(profile.user_id).isdigit():
-                user_id = int(profile.user_id)
+            if profile.clerk_user_id not in self.user_rating_matrix:
+                return [], []
             
-            rows, db_reasons = collaborative_filtering_recommendations_pg(
-                clerk_user_id=profile.clerk_user_id,
-                user_id=user_id,
-                limit=limit
-            )
+            # Get all books user hasn't rated
+            user_rated = set(self.user_rating_matrix[profile.clerk_user_id].keys())
+            exclude_ids = set(profile.reading_history + profile.wishlist)
             
-            if rows:
-                for row in rows:
-                    book = Book(
-                        id=row['book_id'],
-                        title=row.get('title', 'Unknown'),
-                        author=row.get('author', 'Unknown'),
-                        genre=row.get('genre'),
-                        cover_image_url=row.get('cover_image_url'),
-                        rating=safe_float_conversion(row.get('rating')),
-                        similarity_score=float(row.get('score', 0.5))
-                    )
+            # Get candidate books (books rated by similar users)
+            candidate_books = set()
+            for other_user, other_ratings in self.user_rating_matrix.items():
+                if other_user != profile.clerk_user_id:
+                    candidate_books.update(other_ratings.keys())
+            
+            candidate_books -= user_rated
+            candidate_books -= exclude_ids
+            
+            # Predict ratings for candidate books
+            predictions = []
+            for book_id in candidate_books:
+                predicted_rating = self._predict_rating_collaborative(profile.clerk_user_id, book_id)
+                if predicted_rating > profile.preferred_rating_threshold:
+                    predictions.append((book_id, predicted_rating))
+            
+            # Sort by predicted rating
+            predictions.sort(key=lambda x: x[1], reverse=True)
+            
+            # Fetch book details
+            top_book_ids = [book_id for book_id, _ in predictions[:limit]]
+            if top_book_ids:
+                books = self._fetch_books_by_ids(top_book_ids)
+                for book in books:
+                    # Normalize predicted rating to 0-1 for similarity_score
+                    pred_rating = next((r for bid, r in predictions if bid == book.id), 0)
+                    book.similarity_score = pred_rating / 5.0
                     recommendations.append(book)
                 
-                reasons.extend(db_reasons)
-                if not reasons:
-                    reasons.append("Based on users with similar reading preferences")
-                    
-                logger.info(f"Collaborative filtering returned {len(recommendations)} books")
-            else:
-                # Fallback: Load rating matrix for explicit ratings (legacy)
-                self._load_user_rating_matrix(profile)
-                logger.info(f"Loaded rating matrix: {len(self.user_rating_matrix)} users with explicit ratings")
+                reasons.append("Based on users with similar rating patterns")
+                reasons.append(f"Using Pearson correlation with top-{min(10, len(self.user_rating_matrix))} neighbors")
             
         except Exception as e:
             logger.error(f"Error in collaborative filtering: {e}")

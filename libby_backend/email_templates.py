@@ -27,24 +27,35 @@ def au_bibliophiles_recs_html(books: List[Dict], explore_url: str) -> str:
         author = html.escape(b.get("author","Unknown Author"))
         cover = (b.get("cover_image_url") or "").replace("http://","https://").strip()
         detail_url = b.get("detail_url") or f"{FRONTEND_BASE}/app/books/{html.escape(str(b.get('id','')))}"
-        blurb_base = b.get("blurb") or "Your AU Bibliophiles Book Suggestions"
-        blurb = html.escape(_truncate_two_lines(blurb_base, 68))
+        
+        # Use title and author for the description instead of blurb
+        description = f"{title} by {author}"
+        blurb = html.escape(_truncate_two_lines(description, 68))
+        
+        # Use actual cover image or fallback to placeholder
+        image_url = cover if cover else "https://via.placeholder.com/180x260/e8edf9/2042b2?text=No+Cover"
+        
         return f"""
         <td width="180" align="left" valign="top" style="padding:0 12px 0 0;">
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
             <tr>
               <td style="border-radius:10px;overflow:hidden;">
-                <a href="https://library.au.edu" style="text-decoration:none;border:0;display:block;">
-                  <img src="https://i.pinimg.com/1200x/a3/12/44/a31244052e19b1eaa8ac798e87cadee0.jpg" width="180" height="260" alt="" style="display:block;border:0;outline:none;text-decoration:none;border-radius:10px;box-shadow:0 4px 14px rgba(0,0,0,0.12);object-fit:cover;">
+                <a href="{html.escape(detail_url)}" style="text-decoration:none;border:0;display:block;">
+                  <img src="{html.escape(image_url)}" width="180" height="260" alt="{html.escape(title)}" style="display:block;border:0;outline:none;text-decoration:none;border-radius:10px;box-shadow:0 4px 14px rgba(0,0,0,0.12);object-fit:cover;">
                 </a>
               </td>
             </tr>
             <tr><td height="10" style="line-height:10px;font-size:10px;">&nbsp;</td></tr>
             <tr>
               <td style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111;">
-                <div style="font-size:14px;line-height:20px;">
-                  {blurb}
-                </div>
+                <a href="{html.escape(detail_url)}" style="text-decoration:none;color:#111;">
+                  <div style="font-size:14px;line-height:20px;font-weight:600;margin-bottom:4px;">
+                    {html.escape(title)}
+                  </div>
+                  <div style="font-size:13px;line-height:18px;color:#666;">
+                    by {html.escape(author)}
+                  </div>
+                </a>
               </td>
             </tr>
           </table>

@@ -99,7 +99,7 @@ def get_email_pref():
     conn = get_db_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
-            SELECT email_frequency, last_digest_sent_at
+            SELECT email_frequency, last_digest_sent_at, email
               FROM public.users_with_preferences
              WHERE clerk_user_id = %s
              LIMIT 1
@@ -113,5 +113,55 @@ def get_email_pref():
                   VALUES (%s, 'none')
                   ON CONFLICT (clerk_user_id) DO NOTHING
                 """, (clerk_user_id,))
-            return jsonify({"ok": True, "email_frequency": "none", "last_digest_sent_at": None})
+            return jsonify({"ok": True, "email_frequency": "none", "last_digest_sent_at": None, "email": None})
+        
+        # Convert row to dict and check if email is missing
+        result = dict(row)
+        result["ok"] = True
+        result["email_missing"] = not result.get("email")
+        return jsonify(result)
     return jsonify({"ok": True, **row})
+
+
+@prefs_bp.route("/email/update", methods=["POST"])
+def update_user_email():
+    """Update or add email for a user in users_with_preferences table."""
+    try:
+        data = request.get_json(silent=True) or {}
+        clerk_user_id = (data.get("clerk_user_id") or "").strip()
+        email = (data.get("email") or "").strip()
+        
+        if not clerk_user_id:
+            return jsonify({"ok": False, "error": "Missing clerk_user_id"}), 400
+        if not email:
+            return jsonify({"ok": False, "error": "Missing email"}), 400
+        
+        # Basic email validation
+        if "@" not in email or "." not in email.split("@")[1]:
+            return jsonify({"ok": False, "error": "Invalid email format"}), 400
+        
+        conn = get_db_connection()
+        
+        # Update email in both users_with_preferences and users tables
+        with conn, conn.cursor() as cur:
+            # Update users_with_preferences
+            cur.execute("""
+                INSERT INTO public.users_with_preferences (clerk_user_id, email, email_frequency)
+                VALUES (%s, %s, 'none')
+                ON CONFLICT (clerk_user_id) DO UPDATE 
+                SET email = EXCLUDED.email
+            """, (clerk_user_id, email))
+            
+            # Also update users table if the user exists there
+            cur.execute("""
+                UPDATE public.users 
+                SET email = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE clerk_user_id = %s
+            """, (email, clerk_user_id))
+        
+        return jsonify({"ok": True, "email": email, "message": "Email updated successfully"}), 200
+        
+    except Exception as e:
+        import traceback, logging
+        logging.getLogger(__name__).exception("notify/email/update failed")
+        return jsonify({"ok": False, "error": "internal_error", "detail": type(e).__name__}), 500
