@@ -117,47 +117,41 @@ def search_books_db(query):
     if not conn:
         return None
     try:
-        query_words = query.strip().split()
-        phrase = query.strip()
-        phrase_pattern = f"%{phrase}%"
+        query = query.strip()
+        if not query:
+            return []
+
+        query_words = query.split()
         is_multi_word = len(query_words) >= 2
-        
+        phrase_pattern = f"%{query}%"
+
         with conn.cursor() as cursor:
-            # Build conditions for exact word matches vs partial matches
-            # Build phrase-level condition (rank 0):
-            # - multi-word → ILIKE "%machine learning%"
-            # - single-word → regex word boundary \mjava\M (prevents "javascript")
+            # --- Phrase-level condition ---
             if is_multi_word:
-                phrase_pattern = f"%{phrase}%"
                 phrase_condition = "(b.title ILIKE %s OR b.author ILIKE %s OR b.genre ILIKE %s)"
                 phrase_params = [phrase_pattern, phrase_pattern, phrase_pattern]
             else:
-                boundary = f"\\m{phrase}\\M"  # word-boundary regex
+                boundary = f"\\m{query}\\M"  # word-boundary regex
                 phrase_condition = "(b.title ~* %s OR b.author ~* %s OR b.genre ~* %s)"
                 phrase_params = [boundary, boundary, boundary]
-        
 
-            exact_conditions = []
-            partial_conditions = []
-            params = []
-            
+            # --- Word-level conditions ---
+            exact_conditions, partial_conditions, params = [], [], []
             for word in query_words:
-                # Exact word regex (higher priority)
-                exact_regex = f'\\m{word}\\M'
+                # Exact match condition (regex)
+                exact_regex = f"\\m{word}\\M"
                 exact_conditions.append("(b.title ~* %s OR b.author ~* %s OR b.genre ~* %s)")
                 params.extend([exact_regex, exact_regex, exact_regex])
 
-                # Fuzzy match (lower priority)
+                # Partial / fuzzy match
                 word_pattern = f"%{word}%"
-                
-                # Partial match conditions (fallback)
                 partial_conditions.append("(b.title ILIKE %s OR b.author ILIKE %s OR b.genre ILIKE %s)")
                 params.extend([word_pattern, word_pattern, word_pattern])
-            
-            # Combine conditions: prefer exact matches, allow partial as fallback
-            exact_clause = " AND ".join(exact_conditions)
-            partial_clause = " AND ".join(partial_conditions)
-            
+
+            exact_clause = " AND ".join(exact_conditions) or "TRUE"
+            partial_clause = " AND ".join(partial_conditions) or "TRUE"
+
+            # --- Main SQL ---
             sql = f"""
                 WITH phrase_matches AS (
                     SELECT DISTINCT
@@ -165,8 +159,10 @@ def search_books_db(query):
                         b.title,
                         b.cover_image_url AS coverurl,
                         COALESCE(b.author, 'Unknown Author') AS author,
+                        b.genre,
                         b.rating,
-                        0 as match_type
+                        b.publication_date,
+                        0 AS match_type
                     FROM books b
                     WHERE {phrase_condition}
                 ),
@@ -176,8 +172,10 @@ def search_books_db(query):
                         b.title,
                         b.cover_image_url AS coverurl,
                         COALESCE(b.author, 'Unknown Author') AS author,
+                        b.genre,
                         b.rating,
-                        1 as match_type
+                        b.publication_date,
+                        1 AS match_type
                     FROM books b
                     WHERE {exact_clause}
                     AND b.book_id NOT IN (SELECT id FROM phrase_matches)
@@ -185,15 +183,13 @@ def search_books_db(query):
                 partial_matches AS (
                     SELECT DISTINCT
                         b.book_id AS id,
-                        b.isbn,
                         b.title,
-                        b.description,
                         b.cover_image_url AS coverurl,
-                        b.genre,
                         COALESCE(b.author, 'Unknown Author') AS author,
+                        b.genre,
                         b.rating,
                         b.publication_date,
-                        2 as match_type
+                        2 AS match_type
                     FROM books b
                     WHERE {partial_clause}
                     AND b.book_id NOT IN (SELECT id FROM phrase_matches)
@@ -207,103 +203,128 @@ def search_books_db(query):
                     UNION ALL
                     SELECT * FROM partial_matches
                 ) combined
-                ORDER BY match_type ASC, rating DESC NULLS LAST
+                ORDER BY match_type ASC, rating DESC NULLS LAST, publication_date DESC NULLS LAST
                 LIMIT 50;
             """
-            
-            cursor.execute(sql, params+phrase_params)
-            return cursor.fetchall()
-            
+
+            cursor.execute(sql, params + phrase_params)
+            results = cursor.fetchall()
+            return results
+
     except Exception as e:
         print("Railway search error:", e)
-        return None
+        return []
     finally:
         conn.close()
-
 
 
 # -----------------------------------------------------------------------------
 # TRENDING
 # -----------------------------------------------------------------------------
 def get_trending_books_db(period, page, per_page):
+    """
+    Netflix-style Trending Engine for Libby-Bot
+    -----------------------------------------------------
+    Layer 1: Real user activity (last 7 / 30 / 90 days)
+    Layer 2: Metadata fallback (rating + recency)
+    Layer 3: Curated backup (static featured list)
+    """
+    import json
     conn = get_db_connection()
     if not conn:
         return None
 
     offset = (page - 1) * per_page
-    # Updated period mapping: weekly → current year, monthly → last 2 years, yearly → last 5 years
-    period_mapping = {
-        'weekly': 0, '1week': 0,
-        'monthly': 2, '1month': 2,
-        'yearly': 5, '1year': 5,
-        '2years': 7, '5years': 10
-    }
-    years = period_mapping.get(period, 5)
+
+    # --- Time window based on period ---
+    period_days = {
+        'weekly': 7,
+        'monthly': 30,
+        'yearly': 365
+    }.get(period, 90)  # default = 3 months
 
     try:
         with conn.cursor() as cursor:
-            # If years == 0, filter only current year
-            if years == 0:
+            # -----------------------------------------------------------------
+            # 🟩 LAYER 1: Activity-based trending (real user interactions)
+            # -----------------------------------------------------------------
+            cursor.execute("""
+                WITH recent_activity AS (
+                    SELECT ui.book_id,
+                           COUNT(*) AS interactions,
+                           AVG(ui.rating) AS avg_rating,
+                           MAX(ui.timestamp) AS last_activity
+                    FROM user_interactions ui
+                    WHERE ui.timestamp >= CURRENT_DATE - INTERVAL %s
+                    GROUP BY ui.book_id
+                )
+                SELECT b.book_id AS id,
+                       b.title,
+                       b.cover_image_url AS cover_image_url,
+                       COALESCE(b.author, 'Unknown Author') AS author,
+                       b.rating,
+                       b.publication_date,
+                       ra.interactions,
+                       ra.avg_rating
+                FROM recent_activity ra
+                JOIN books b ON b.book_id = ra.book_id
+                ORDER BY ra.interactions DESC, ra.avg_rating DESC NULLS LAST, b.rating DESC NULLS LAST
+                LIMIT %s OFFSET %s;
+            """, (f"{period_days} days", per_page, offset))
+
+            books = cursor.fetchall()
+            source = "activity"
+
+            # -----------------------------------------------------------------
+            # 🟨 LAYER 2: Metadata fallback (if little or no user activity)
+            # -----------------------------------------------------------------
+            if not books or len(books) < 10:
+                print("⚠️ Few activity-based results — using rating + recency fallback")
                 cursor.execute("""
                     SELECT DISTINCT
                         b.book_id AS id,
                         b.title,
                         b.cover_image_url AS cover_image_url,
-                        b.rating,
                         COALESCE(b.author, 'Unknown Author') AS author,
-                        b.publication_date AS year
+                        b.rating,
+                        b.publication_date
                     FROM books b
-                    WHERE b.publication_date = EXTRACT(YEAR FROM CURRENT_DATE)
-                    AND b.cover_image_url IS NOT NULL
-                    AND b.rating IS NOT NULL
+                    WHERE b.rating IS NOT NULL
+                      AND b.cover_image_url IS NOT NULL
+                      AND b.cover_image_url <> ''
                     ORDER BY b.rating DESC NULLS LAST, b.publication_date DESC NULLS LAST
                     LIMIT %s OFFSET %s;
                 """, (per_page, offset))
-            else:
-                cursor.execute("""
-                    WITH trending_books AS (
-                        SELECT DISTINCT
-                            b.book_id AS id,
-                            b.title,
-                            b.cover_image_url AS cover_image_url,
-                            b.rating,
-                            CASE 
-                                WHEN b.publication_date > 2025 THEN b.publication_date - 543
-                                ELSE b.publication_date
-                            END AS corrected_date,
-                            COALESCE(b.author, 'Unknown Author') AS author,
-                            CASE 
-                                WHEN (
-                                    CASE 
-                                        WHEN b.publication_date > 2025 THEN b.publication_date - 543
-                                        ELSE b.publication_date
-                                    END
-                                ) >= (EXTRACT(YEAR FROM CURRENT_DATE) - %s) THEN 1 
-                                ELSE 2 
-                            END as date_priority
-                        FROM books b
-                        WHERE
-                            b.cover_image_url IS NOT NULL 
-                            AND b.cover_image_url <> ''
-                            AND (
-                                CASE 
-                                    WHEN b.publication_date > 2025 THEN b.publication_date - 543
-                                    ELSE b.publication_date
-                                END
-                            ) >= (EXTRACT(YEAR FROM CURRENT_DATE) - %s)
-                    )
-                    SELECT id, title, cover_image_url, rating, author, corrected_date AS publication_date
-                    FROM trending_books
-                    ORDER BY date_priority ASC, rating DESC, corrected_date DESC NULLS LAST
-                    LIMIT %s OFFSET %s;
-                """, (years, years, per_page, offset))
-            books = cursor.fetchall()
+                books = cursor.fetchall()
+                source = "metadata"
 
-            # Total count
+            # -----------------------------------------------------------------
+            # 🟥 LAYER 3: Curated static fallback (if DB is still too empty)
+            # -----------------------------------------------------------------
+            if not books or len(books) < 3:
+                print("⚠️ Falling back to curated featured books")
+                try:
+                    with open("libby_backend/static/featured_books.json", "r", encoding="utf-8") as f:
+                        featured = json.load(f)
+                        books = featured[:per_page]
+                        source = "featured"
+                except Exception as e:
+                    print("No featured_books.json found:", e)
+                    books = []
+                    source = "empty"
+
+            # -----------------------------------------------------------------
+            # Count total for pagination
+            # -----------------------------------------------------------------
             cursor.execute("SELECT COUNT(*) AS count FROM books;")
-            total_books = cursor.fetchone()['count']
+            total_books = cursor.fetchone()["count"]
 
-            return {'books': books, 'total_books': total_books}
+            return {
+                "books": books,
+                "total_books": total_books,
+                "source": source
+            }
+
     except Exception as e:
         print("Railway trending query error:", e)
         return None
