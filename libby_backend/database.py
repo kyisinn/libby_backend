@@ -118,21 +118,37 @@ def search_books_db(query):
         return None
     try:
         query_words = query.strip().split()
+        phrase = query.strip()
+        phrase_pattern = f"%{phrase}%"
+        is_multi_word = len(query_words) >= 2
         
         with conn.cursor() as cursor:
             # Build conditions for exact word matches vs partial matches
+            # Build phrase-level condition (rank 0):
+            # - multi-word → ILIKE "%machine learning%"
+            # - single-word → regex word boundary \mjava\M (prevents "javascript")
+            if is_multi_word:
+                phrase_pattern = f"%{phrase}%"
+                phrase_condition = "(b.title ILIKE %s OR b.author ILIKE %s OR b.genre ILIKE %s)"
+                phrase_params = [phrase_pattern, phrase_pattern, phrase_pattern]
+            else:
+                boundary = f"\\m{phrase}\\M"  # word-boundary regex
+                phrase_condition = "(b.title ~* %s OR b.author ~* %s OR b.genre ~* %s)"
+                phrase_params = [boundary, boundary, boundary]
+        
+
             exact_conditions = []
             partial_conditions = []
             params = []
             
             for word in query_words:
-                # Exact word match using word boundaries
-                word_boundary = f'\\m{word}\\M'  # PostgreSQL word boundaries
-                word_pattern = f"%{word}%"
-                
-                # Exact word conditions (higher priority)
+                # Exact word regex (higher priority)
+                exact_regex = f'\\m{word}\\M'
                 exact_conditions.append("(b.title ~* %s OR b.author ~* %s OR b.genre ~* %s)")
-                params.extend([word_boundary, word_boundary, word_boundary])
+                params.extend([exact_regex, exact_regex, exact_regex])
+
+                # Fuzzy match (lower priority)
+                word_pattern = f"%{word}%"
                 
                 # Partial match conditions (fallback)
                 partial_conditions.append("(b.title ILIKE %s OR b.author ILIKE %s OR b.genre ILIKE %s)")
@@ -143,20 +159,28 @@ def search_books_db(query):
             partial_clause = " AND ".join(partial_conditions)
             
             sql = f"""
-                WITH exact_matches AS (
+                WITH phrase_matches AS (
                     SELECT DISTINCT
                         b.book_id AS id,
-                        b.isbn,
                         b.title,
-                        b.description,
                         b.cover_image_url AS coverurl,
-                        b.genre,
                         COALESCE(b.author, 'Unknown Author') AS author,
                         b.rating,
-                        b.publication_date,
+                        0 as match_type
+                    FROM books b
+                    WHERE {phrase_condition}
+                ),
+                exact_matches AS (
+                    SELECT DISTINCT
+                        b.book_id AS id,
+                        b.title,
+                        b.cover_image_url AS coverurl,
+                        COALESCE(b.author, 'Unknown Author') AS author,
+                        b.rating,
                         1 as match_type
                     FROM books b
                     WHERE {exact_clause}
+                    AND b.book_id NOT IN (SELECT id FROM phrase_matches)
                 ),
                 partial_matches AS (
                     SELECT DISTINCT
@@ -172,19 +196,22 @@ def search_books_db(query):
                         2 as match_type
                     FROM books b
                     WHERE {partial_clause}
+                    AND b.book_id NOT IN (SELECT id FROM phrase_matches)
                     AND b.book_id NOT IN (SELECT id FROM exact_matches)
                 )
-                SELECT id, isbn, title, description, coverurl, genre, author, rating, publication_date
+                SELECT *
                 FROM (
+                    SELECT * FROM phrase_matches
+                    UNION ALL
                     SELECT * FROM exact_matches
                     UNION ALL
                     SELECT * FROM partial_matches
                 ) combined
                 ORDER BY match_type ASC, rating DESC NULLS LAST
-                LIMIT 50
+                LIMIT 50;
             """
             
-            cursor.execute(sql, params)
+            cursor.execute(sql, params+phrase_params)
             return cursor.fetchall()
             
     except Exception as e:
@@ -204,86 +231,78 @@ def get_trending_books_db(period, page, per_page):
         return None
 
     offset = (page - 1) * per_page
+    # Updated period mapping: weekly → current year, monthly → last 2 years, yearly → last 5 years
     period_mapping = {
-        'weekly': '7 days', '1week': '7 days',
-        'monthly': '30 days', '1month': '30 days',
-        '3months': '90 days', '6months': '180 days',
-        'yearly': '365 days', '1year': '365 days',
-        '2years': '730 days', '5years': '1825 days'
+        'weekly': 0, '1week': 0,
+        'monthly': 2, '1month': 2,
+        'yearly': 5, '1year': 5,
+        '2years': 7, '5years': 10
     }
-    interval_period = period_mapping.get(period, '1825 days')
+    years = period_mapping.get(period, 5)
 
     try:
         with conn.cursor() as cursor:
-            cursor.execute("""
-                WITH trending_books AS (
+            # If years == 0, filter only current year
+            if years == 0:
+                cursor.execute("""
                     SELECT DISTINCT
-                        b.book_id,
-                        b.isbn,
+                        b.book_id AS id,
                         b.title,
-                        b.description,
-                        b.cover_image_url,
-                        b.genre,
+                        b.cover_image_url AS cover_image_url,
                         b.rating,
-                        b.author,
-                        CASE 
-                            WHEN b.publication_date::INTEGER > 2025
-                            THEN b.publication_date::INTEGER - 543
-                            ELSE b.publication_date::INTEGER
-                        END AS corrected_year,
-                        CASE 
-                            WHEN CAST(
-                                CASE 
-                                    WHEN b.publication_date::INTEGER > 2025
-                                    THEN b.publication_date::INTEGER - 543
-                                    ELSE b.publication_date::INTEGER
-                                END AS INTEGER
-                            ) >= EXTRACT(YEAR FROM (CURRENT_DATE - CAST(%s AS INTERVAL))) THEN 1 
-                            ELSE 2 
-                        END as date_priority
+                        COALESCE(b.author, 'Unknown Author') AS author,
+                        b.publication_date AS year
                     FROM books b
-                    WHERE
-                        b.cover_image_url IS NOT NULL 
-                        AND b.cover_image_url <> ''
-                        AND b.rating IS NOT NULL
-                        AND b.publication_date IS NOT NULL
-                        AND b.publication_date::INTEGER > 1900
-                        AND CAST(
+                    WHERE b.publication_date = EXTRACT(YEAR FROM CURRENT_DATE)
+                    AND b.cover_image_url IS NOT NULL
+                    AND b.rating IS NOT NULL
+                    ORDER BY b.rating DESC NULLS LAST, b.publication_date DESC NULLS LAST
+                    LIMIT %s OFFSET %s;
+                """, (per_page, offset))
+            else:
+                cursor.execute("""
+                    WITH trending_books AS (
+                        SELECT DISTINCT
+                            b.book_id AS id,
+                            b.title,
+                            b.cover_image_url AS cover_image_url,
+                            b.rating,
                             CASE 
-                                WHEN b.publication_date::INTEGER > 2025
-                                THEN b.publication_date::INTEGER - 543
-                                ELSE b.publication_date::INTEGER
-                            END AS INTEGER
-                        ) >= EXTRACT(YEAR FROM (CURRENT_DATE - CAST(%s AS INTERVAL)))
-                )
-                SELECT 
-                    book_id AS id,
-                    isbn,
-                    title,
-                    description,
-                    cover_image_url AS coverurl,
-                    genre,
-                    rating,
-                    COALESCE(author, 'Unknown Author') AS author,
-                    corrected_year AS publication_date
-                FROM trending_books
-                ORDER BY date_priority ASC, rating DESC, corrected_year DESC NULLS LAST
-                LIMIT %s OFFSET %s
-            """, (interval_period, interval_period, per_page, offset))
+                                WHEN b.publication_date > 2025 THEN b.publication_date - 543
+                                ELSE b.publication_date
+                            END AS corrected_date,
+                            COALESCE(b.author, 'Unknown Author') AS author,
+                            CASE 
+                                WHEN (
+                                    CASE 
+                                        WHEN b.publication_date > 2025 THEN b.publication_date - 543
+                                        ELSE b.publication_date
+                                    END
+                                ) >= (EXTRACT(YEAR FROM CURRENT_DATE) - %s) THEN 1 
+                                ELSE 2 
+                            END as date_priority
+                        FROM books b
+                        WHERE
+                            b.cover_image_url IS NOT NULL 
+                            AND b.cover_image_url <> ''
+                            AND (
+                                CASE 
+                                    WHEN b.publication_date > 2025 THEN b.publication_date - 543
+                                    ELSE b.publication_date
+                                END
+                            ) >= (EXTRACT(YEAR FROM CURRENT_DATE) - %s)
+                    )
+                    SELECT id, title, cover_image_url, rating, author, corrected_date AS publication_date
+                    FROM trending_books
+                    ORDER BY date_priority ASC, rating DESC, corrected_date DESC NULLS LAST
+                    LIMIT %s OFFSET %s;
+                """, (years, years, per_page, offset))
             books = cursor.fetchall()
 
-            # Get total count for pagination - only books matching the period filter
-            cursor.execute("""
-                SELECT COUNT(DISTINCT b.book_id) AS count
-                FROM books b
-                WHERE b.cover_image_url IS NOT NULL 
-                  AND b.cover_image_url <> ''
-                  AND b.rating IS NOT NULL
-                  AND b.publication_date IS NOT NULL
-                  AND b.publication_date::INTEGER > 1900
-            """)
+            # Total count
+            cursor.execute("SELECT COUNT(*) AS count FROM books;")
             total_books = cursor.fetchone()['count']
-            
+
             return {'books': books, 'total_books': total_books}
     except Exception as e:
         print("Railway trending query error:", e)
@@ -309,9 +328,7 @@ def get_books_by_major_db(major, page, per_page):
                     b.book_id AS id,
                     b.isbn,
                     b.title,
-                    b.description,
-                    b.cover_image_url AS coverurl,
-                    b.genre,
+                    b.cover_image_url AS cover_image_url,
                     b.rating,
                     COALESCE(b.author, 'Unknown Author') AS author,
                     b.publication_date
@@ -357,9 +374,7 @@ def get_similar_books_details(similar_book_ids):
                     b.book_id AS id,
                     b.isbn,
                     b.title,
-                    b.description,
-                    b.cover_image_url AS coverurl,
-                    b.genre,
+                    b.cover_image_url AS cover_image_url,
                     b.rating,
                     COALESCE(b.author, 'Unknown Author') AS author,
                     b.publication_date
@@ -386,9 +401,7 @@ def get_books_by_genre_db(target_genre, exclude_book_id, limit=10):
                     b.book_id AS id,
                     b.isbn,
                     b.title,
-                    b.description,
-                    b.cover_image_url AS coverurl,
-                    b.genre,
+                    b.cover_image_url AS cover_image_url,
                     b.rating,
                     COALESCE(b.author, 'Unknown Author') AS author,
                     b.publication_date
@@ -431,6 +444,7 @@ def get_book_by_id_db(book_id):
         return None
     finally:
         conn.close()
+
 
 
 def _resolve_numeric_user_id(conn, user_id: Optional[int], clerk_user_id: Optional[str]) -> Optional[int]:

@@ -8,5 +8,6 @@ Flask-Caching==2.3.0
 redis==5.0.8
 sqlalchemy==2.0.23
 clerk-backend-api==3.3.0
+requests==2.32.5
 
 APScheduler==3.10.1
