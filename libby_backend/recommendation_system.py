@@ -376,6 +376,18 @@ class EnhancedBookRecommendationEngine:
 
                 for row in cursor.fetchall():
                     book_id = row.get("book_id")
+                    # Publication year normalization
+                    pub_date = row.get("publication_date")
+                    year = None
+                    if pub_date:
+                        s = str(pub_date).strip()
+                        if s.isdigit() and len(s) == 4:
+                            year = s
+                        else:
+                            try:
+                                year = str(int(s[:4]))
+                            except Exception:
+                                year = None
                     if book_id and book_id not in exclude_ids:
                         books.append(Book(
                             id=book_id,
@@ -385,7 +397,7 @@ class EnhancedBookRecommendationEngine:
                             description=row.get("description"),
                             cover_image_url=row.get("cover_image_url"),
                             rating=safe_float_conversion(row.get("rating")),
-                            publication_date=str(row.get("publication_date")) if row.get("publication_date") else None,
+                            publication_date=year,
                             isbn=row.get("isbn")
                         ))
                         exclude_ids.append(book_id)
@@ -425,6 +437,18 @@ class EnhancedBookRecommendationEngine:
                 """, params)
 
                 for row in cursor.fetchall():
+                    # Publication year normalization
+                    pub_date = row.get("publication_date")
+                    year = None
+                    if pub_date:
+                        s = str(pub_date).strip()
+                        if s.isdigit() and len(s) == 4:
+                            year = s
+                        else:
+                            try:
+                                year = str(int(s[:4]))
+                            except Exception:
+                                year = None
                     books.append(Book(
                         id=row["book_id"],
                         title=row["title"],
@@ -433,7 +457,7 @@ class EnhancedBookRecommendationEngine:
                         description=row.get("description"),
                         cover_image_url=row.get("cover_image_url"),
                         rating=safe_float_conversion(row.get("rating")),
-                        publication_date=str(row.get("publication_date")) if row.get("publication_date") else None,
+                        publication_date=year,
                         isbn=row.get("isbn")
                     ))
 
@@ -611,6 +635,18 @@ class EnhancedBookRecommendationEngine:
                 """, (limit,))
                 
                 for row in cur.fetchall():
+                    # Publication year normalization
+                    pub_date = row.get("publication_date")
+                    year = None
+                    if pub_date:
+                        s = str(pub_date).strip()
+                        if s.isdigit() and len(s) == 4:
+                            year = s
+                        else:
+                            try:
+                                year = str(int(s[:4]))
+                            except Exception:
+                                year = None
                     books.append(Book(
                         id=row["book_id"],
                         title=row["title"],
@@ -619,7 +655,7 @@ class EnhancedBookRecommendationEngine:
                         description=row.get("description"),
                         cover_image_url=row.get("cover_image_url"),
                         rating=safe_float_conversion(row.get("rating")),
-                        publication_date=str(row.get("publication_date")) if row.get("publication_date") else None,
+                        publication_date=year,
                         isbn=row.get("isbn")
                     ))
             
@@ -708,6 +744,18 @@ class EnhancedBookRecommendationEngine:
                 """, book_ids)
                 
                 for row in cur.fetchall():
+                    # Publication year normalization
+                    pub_date = row.get("publication_date")
+                    year = None
+                    if pub_date:
+                        s = str(pub_date).strip()
+                        if s.isdigit() and len(s) == 4:
+                            year = s
+                        else:
+                            try:
+                                year = str(int(s[:4]))
+                            except Exception:
+                                year = None
                     books.append(Book(
                         id=row["book_id"],
                         title=row["title"],
@@ -716,7 +764,7 @@ class EnhancedBookRecommendationEngine:
                         description=row.get("description"),
                         cover_image_url=row.get("cover_image_url"),
                         rating=safe_float_conversion(row.get("rating")),
-                        publication_date=str(row.get("publication_date")) if row.get("publication_date") else None,
+                        publication_date=year,
                         isbn=row.get("isbn")
                     ))
             
@@ -764,6 +812,18 @@ class EnhancedBookRecommendationEngine:
                 """, [profile.preferred_rating_threshold] + params)
                 
                 for row in cur.fetchall():
+                    # Publication year normalization
+                    pub_date = row.get("publication_date")
+                    year = None
+                    if pub_date:
+                        s = str(pub_date).strip()
+                        if s.isdigit() and len(s) == 4:
+                            year = s
+                        else:
+                            try:
+                                year = str(int(s[:4]))
+                            except Exception:
+                                year = None
                     book = Book(
                         id=row["book_id"],
                         title=row["title"],
@@ -772,7 +832,7 @@ class EnhancedBookRecommendationEngine:
                         description=row.get("description"),
                         cover_image_url=row.get("cover_image_url"),
                         rating=safe_float_conversion(row.get("rating")),
-                        publication_date=str(row.get("publication_date")) if row.get("publication_date") else None,
+                        publication_date=year,
                         isbn=row.get("isbn")
                     )
                     
