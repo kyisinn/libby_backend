@@ -61,7 +61,7 @@ def _book_to_card(b: Any) -> dict:
         "author": getattr(b, "author", None) or getattr(b, "author_name", "Unknown Author"),
         "cover_image_url": getattr(b, "cover_image_url", None),
         "blurb": getattr(b, "short_description", None) or getattr(b, "description", None) or "Your AU Bibliophiles Book Suggestions",
-        "detail_url": f"{FRONTEND_BASE}/app/books/{getattr(b,'id','')}",
+        "detail_url": f"{FRONTEND_BASE}/book/{getattr(b,'id','')}",
     }
 
 
