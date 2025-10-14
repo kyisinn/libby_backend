@@ -166,6 +166,8 @@ def get_improved_recommendations_with_fallbacks(user_id: str):
                 "description": getattr(book, "description", None),
                 "rating": float(getattr(book, "rating", 0.0) or 0.0),
                 "cover_image_url": cover_url,
+                "publication_date": getattr(book, "publication_date", None),
+                "year": getattr(book, "publication_date", None),
                 "similarity_score": float(getattr(book, "similarity_score", 0.0) or 0.0),
             })
 
