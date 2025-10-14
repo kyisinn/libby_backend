@@ -342,13 +342,14 @@ class EnhancedBookRecommendationEngine:
                     pub_date = row.get("publication_date")
                     year = None
                     if pub_date:
-                        try:
-                            year_int = int(str(pub_date)[:4])
-                            if year_int > 2025:
-                                year_int -= 543
-                            year = str(year_int)
-                        except Exception:
-                            year = None
+                        s = str(pub_date).strip()
+                        if s.isdigit() and len(s) == 4:
+                            year = s
+                        else:
+                            try:
+                                year = str(int(s[:4]))
+                            except Exception:
+                                year = None
                     if book_id and book_id not in exclude_ids:
                         books.append(Book(
                             id=book_id,
@@ -402,13 +403,14 @@ class EnhancedBookRecommendationEngine:
                     pub_date = row.get("publication_date")
                     year = None
                     if pub_date:
-                        try:
-                            year_int = int(str(pub_date)[:4])
-                            if year_int > 2025:
-                                year_int -= 543
-                            year = str(year_int)
-                        except Exception:
-                            year = None
+                        s = str(pub_date).strip()
+                        if s.isdigit() and len(s) == 4:
+                            year = s
+                        else:
+                            try:
+                                year = str(int(s[:4]))
+                            except Exception:
+                                year = None
                     books.append(Book(
                         id=row["book_id"],
                         title=row["title"],
@@ -599,13 +601,14 @@ class EnhancedBookRecommendationEngine:
                     pub_date = row.get("publication_date")
                     year = None
                     if pub_date:
-                        try:
-                            year_int = int(str(pub_date)[:4])
-                            if year_int > 2025:
-                                year_int -= 543
-                            year = str(year_int)
-                        except Exception:
-                            year = None
+                        s = str(pub_date).strip()
+                        if s.isdigit() and len(s) == 4:
+                            year = s
+                        else:
+                            try:
+                                year = str(int(s[:4]))
+                            except Exception:
+                                year = None
                     books.append(Book(
                         id=row["book_id"],
                         title=row["title"],
@@ -698,13 +701,14 @@ class EnhancedBookRecommendationEngine:
                     pub_date = row.get("publication_date")
                     year = None
                     if pub_date:
-                        try:
-                            year_int = int(str(pub_date)[:4])
-                            if year_int > 2025:
-                                year_int -= 543
-                            year = str(year_int)
-                        except Exception:
-                            year = None
+                        s = str(pub_date).strip()
+                        if s.isdigit() and len(s) == 4:
+                            year = s
+                        else:
+                            try:
+                                year = str(int(s[:4]))
+                            except Exception:
+                                year = None
                     books.append(Book(
                         id=row["book_id"],
                         title=row["title"],
@@ -765,13 +769,14 @@ class EnhancedBookRecommendationEngine:
                     pub_date = row.get("publication_date")
                     year = None
                     if pub_date:
-                        try:
-                            year_int = int(str(pub_date)[:4])
-                            if year_int > 2025:
-                                year_int -= 543
-                            year = str(year_int)
-                        except Exception:
-                            year = None
+                        s = str(pub_date).strip()
+                        if s.isdigit() and len(s) == 4:
+                            year = s
+                        else:
+                            try:
+                                year = str(int(s[:4]))
+                            except Exception:
+                                year = None
                     book = Book(
                         id=row["book_id"],
                         title=row["title"],
