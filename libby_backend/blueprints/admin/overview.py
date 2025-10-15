@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify
-from database import get_db_connection
+from libby_backend.database import get_db_connection
 
 admin_bp = Blueprint("admin_bp", __name__)
 
