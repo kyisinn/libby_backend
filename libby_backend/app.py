@@ -18,6 +18,7 @@ from libby_backend.digests import send_due_digests_batch
 
 
 
+
 # =============================================================================
 # APPLICATION SETUP
 # =============================================================================
@@ -112,6 +113,7 @@ atexit.register(lambda: scheduler.shutdown(wait=False))
 def run_due_now():
     count = send_due_digests_batch()
     return jsonify({"ok": True, "sent": count})
+
 
 # =============================================================================
 # HEALTH CHECK (fallback if no health blueprint is present)

@@ -26,7 +26,7 @@ def au_bibliophiles_recs_html(books: List[Dict], explore_url: str) -> str:
         title = html.escape(b.get("title","Untitled"))
         author = html.escape(b.get("author","Unknown Author"))
         cover = (b.get("cover_image_url") or "").replace("http://","https://").strip()
-        detail_url = b.get("detail_url") or f"{FRONTEND_BASE}/app/books/{html.escape(str(b.get('id','')))}"
+        detail_url = b.get("detail_url") or f"{FRONTEND_BASE}/book/{html.escape(str(b.get('id','')))}"
         
         # Use title and author for the description instead of blurb
         description = f"{title} by {author}"
