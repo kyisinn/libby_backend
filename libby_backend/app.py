@@ -114,15 +114,6 @@ def run_due_now():
 
 
 # =============================================================================
-# ADMIN BLUEPRINT
-# =============================================================================
-from libby_backend.blueprints.admin import admin_bp  # use full import path for consistency
-
-app.register_blueprint(admin_bp, url_prefix="/api/admin")
-
-
-
-# =============================================================================
 # HEALTH CHECK (fallback if no health blueprint is present)
 # =============================================================================
 @app.route('/api/health', methods=['GET'])
