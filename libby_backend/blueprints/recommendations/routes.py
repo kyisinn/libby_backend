@@ -346,6 +346,11 @@ def get_books_by_genre_route():
             return jsonify({"success": False, "error": "Database unavailable"}), 503
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Count total books for this genre
+            cur.execute("SELECT COUNT(*) AS total_books FROM books WHERE genre ILIKE %s", (f"%{genre}%",))
+            total_books = cur.fetchone()["total_books"]
+
+            # Fetch paginated results
             cur.execute("""
                 SELECT book_id AS id, isbn, title, author, genre, rating, cover_image_url, publication_date
                 FROM books
@@ -363,7 +368,7 @@ def get_books_by_genre_route():
             "genre": genre,
             "page": page,
             "per_page": per_page,
-            "total": len(rows),
+            "total_books": total_books,   # ✅ FIXED — send total_books, not len(rows)
             "books": rows
         }), 200
 
