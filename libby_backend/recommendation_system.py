@@ -183,9 +183,9 @@ class EnhancedBookRecommendationEngine:
         """Extract content for TF-IDF vectorization"""
         parts = []
         if book.title:
-            parts.append(book.title * 2)  # Weight title higher
+            parts.append(book.title * 2)  
         if book.genre:
-            parts.append(book.genre * 2)  # Weight genre higher
+            parts.append(book.genre * 2)  
         if book.description:
             parts.append(book.description)
         if book.author:
@@ -992,16 +992,7 @@ class EnhancedBookRecommendationEngine:
             return []
 
     def hybrid_recommendations_enhanced(self, profile: UserProfile, total_limit: int = 30) -> RecommendationResult:
-        """
-        Hybrid Fusion with mathematical weighting
-        Formula: Final_Score = 0.35(CBF) + 0.25(CF) + 0.20(Trending) + 0.15(Author) + 0.05(Diversity)
         
-        Post-processing:
-        - Remove duplicates
-        - Normalize scores (0-1)
-        - Apply rating threshold
-        - Return Top-N
-        """
         try:
             # Hydrate profile from DB
             try:

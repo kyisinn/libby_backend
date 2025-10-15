@@ -30,11 +30,16 @@ def send_html_email(to_email: str, subject: str, html: str):
         # --- Try Resend API fallback ---
         try:
             api_key = os.getenv("RESEND_API_KEY")
-            sender_email = os.getenv("SENDER_EMAIL")
             sender_name = os.getenv("SENDER_NAME", "AU Bibliophiles")
             
             if not api_key:
                 raise ValueError("RESEND_API_KEY not found in environment")
+            
+            # Use custom verified domain if provided, otherwise use Resend's built-in domain
+            # For production: Add RESEND_SENDER_EMAIL="noreply@yourdomain.com" to your .env
+            # For testing: Use the built-in onboarding@resend.dev
+            resend_sender_email = os.getenv("RESEND_SENDER_EMAIL", "onboarding@resend.dev")
+            resend_sender = f"{sender_name} <{resend_sender_email}>"
             
             response = requests.post(
                 "https://api.resend.com/emails",
@@ -43,7 +48,7 @@ def send_html_email(to_email: str, subject: str, html: str):
                     "Content-Type": "application/json"
                 },
                 json={
-                    "from": f"{sender_name} <{sender_email}>",
+                    "from": resend_sender,
                     "to": [to_email],
                     "subject": subject,
                     "html": html  # Send HTML content
