@@ -1,45 +1,3 @@
-@rec_bp.route("/by-genre", methods=["GET"])
-def get_books_by_genre_route():
-    """Fetch books by genre for API clients"""
-    try:
-        genre = request.args.get("genres", "").strip()
-        page = int(request.args.get("page", 1))
-        per_page = int(request.args.get("per_page", 20))
-        if not genre:
-            return jsonify({"success": False, "error": "Missing genres parameter"}), 400
-
-        offset = (page - 1) * per_page
-
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({"success": False, "error": "Database unavailable"}), 503
-
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT book_id AS id, isbn, title, author, genre, rating, cover_image_url, publication_date
-                FROM books
-                WHERE genre ILIKE %s
-                ORDER BY rating DESC NULLS LAST
-                OFFSET %s LIMIT %s
-            """, (f"%{genre}%", offset, per_page))
-            rows = cur.fetchall() or []
-
-        for r in rows:
-            r["cover_image_url"] = _to_https(r.get("cover_image_url"))
-
-        return jsonify({
-            "success": True,
-            "genre": genre,
-            "page": page,
-            "per_page": per_page,
-            "total": len(rows),
-            "books": rows
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error in /by-genre: {e}")
-        return jsonify({"success": False, "error": "Failed to fetch by genre", "details": str(e)}), 500
-
 # blueprints/recommendations/routes.py
 # Simplified Recommendation System Routes - Only Essential Endpoints
 from flask import Blueprint, jsonify, request
@@ -369,3 +327,46 @@ def recommendation_health_check():
             "status": "unhealthy",
             "error": str(e)
         }), 500
+
+
+@rec_bp.route("/by-genre", methods=["GET"])
+def get_books_by_genre_route():
+    """Fetch books by genre for API clients"""
+    try:
+        genre = request.args.get("genres", "").strip()
+        page = int(request.args.get("page", 1))
+        per_page = int(request.args.get("per_page", 20))
+        if not genre:
+            return jsonify({"success": False, "error": "Missing genres parameter"}), 400
+
+        offset = (page - 1) * per_page
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"success": False, "error": "Database unavailable"}), 503
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT book_id AS id, isbn, title, author, genre, rating, cover_image_url, publication_date
+                FROM books
+                WHERE genre ILIKE %s
+                ORDER BY rating DESC NULLS LAST
+                OFFSET %s LIMIT %s
+            """, (f"%{genre}%", offset, per_page))
+            rows = cur.fetchall() or []
+
+        for r in rows:
+            r["cover_image_url"] = _to_https(r.get("cover_image_url"))
+
+        return jsonify({
+            "success": True,
+            "genre": genre,
+            "page": page,
+            "per_page": per_page,
+            "total": len(rows),
+            "books": rows
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error in /by-genre: {e}")
+        return jsonify({"success": False, "error": "Failed to fetch by genre", "details": str(e)}), 500
