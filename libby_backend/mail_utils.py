@@ -35,10 +35,8 @@ def send_html_email(to_email: str, subject: str, html: str):
             if not api_key:
                 raise ValueError("RESEND_API_KEY not found in environment")
             
-            # Use custom verified domain if provided, otherwise use Resend's built-in domain
-            # For production: Add RESEND_SENDER_EMAIL="noreply@yourdomain.com" to your .env
-            # For testing: Use the built-in onboarding@resend.dev
-            resend_sender_email = os.getenv("RESEND_SENDER_EMAIL", "onboarding@resend.dev")
+            #  Resend subdomain or custom verified domain
+            resend_sender_email = os.getenv("RESEND_SENDER_EMAIL", "noreply@au-libbybot.on.resend.dev")
             resend_sender = f"{sender_name} <{resend_sender_email}>"
             
             response = requests.post(
